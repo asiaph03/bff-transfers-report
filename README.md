@@ -167,6 +167,7 @@ not commit them.
 | Message | Fix |
 |---|---|
 | `GOOGLE_ACCESS_TOKEN is not set` / Google sign-in step failed | Check the two repository variables (setup step 2) and the Workload Identity setup (step 1.4) |
+| `Google Sheets did not answer after 4 attempts` | Google was slow (large, formula-heavy sheets). Wait a few minutes and run the preview again |
 | `permission denied: share the spreadsheet with … as Viewer` | Share that sheet with the service-account email |
 | `missing column(s)` / `used more than once` | A sheet's headers changed; update `columns` in the config after checking the change |
 | `unexpected lender statuses` | Decide whether the new status closes a deal; add it to `closed_statuses` or `known_non_closing_statuses` |

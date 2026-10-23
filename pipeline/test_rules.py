@@ -250,3 +250,32 @@ def test_failed_source_retrieval(cfg, tmp_path):
     src = LocalSource({"ringba": str(tmp_path / "missing.csv")})
     with pytest.raises(Exception):
         read_all(cfg, src)
+
+
+def test_google_source_retries_then_reports_timeout(monkeypatch):
+    import requests
+    from pipeline import sheets
+
+    src = sheets.GoogleSheetsSource(access_token="test-token")
+    monkeypatch.setattr(sheets.GoogleSheetsSource, "RETRY_WAITS", (0, 0))
+    calls = {"n": 0}
+
+    def boom(*a, **k):
+        calls["n"] += 1
+        raise requests.exceptions.ReadTimeout("slow")
+
+    monkeypatch.setattr(src.session, "get", boom)
+    with pytest.raises(SourceError, match="did not answer after 3 attempts"):
+        src._get("https://example.invalid", {}, "Ringba2")
+    assert calls["n"] == 3
+
+
+def test_unexpected_error_still_writes_report(tmp_path, monkeypatch):
+    from pipeline import build
+
+    def explode(args):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(build, "run", explode)
+    rc = build.main(["--out", str(tmp_path)])
+    assert rc == 1 and "FAILED" in (tmp_path / "validation.md").read_text()

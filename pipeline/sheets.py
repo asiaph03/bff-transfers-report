@@ -74,25 +74,50 @@ class GoogleSheetsSource:
         self.session.headers["Authorization"] = "Bearer " + token.strip()
         self.account = os.environ.get("GOOGLE_SERVICE_ACCOUNT", "the dashboard service account")
 
-    def _get(self, url: str, params: dict) -> dict:
-        r = self.session.get(url, params=params, timeout=120)
+    # Google can take minutes to answer for large, formula-heavy sheets.
+    TIMEOUT = (30, 300)          # connect, read (seconds)
+    RETRY_WAITS = (15, 45, 90)   # waits before attempts 2, 3 and 4
+
+    def _get(self, url: str, params: dict, where: str = "Google Sheets") -> dict:
+        import time
+
+        import requests
+
+        r = None
+        for attempt, wait in enumerate((0,) + self.RETRY_WAITS, start=1):
+            if wait:
+                print(f"  {where}: retrying in {wait}s (attempt {attempt})", flush=True)
+                time.sleep(wait)
+            try:
+                r = self.session.get(url, params=params, timeout=self.TIMEOUT)
+            except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
+                print(f"  {where}: no answer ({type(e).__name__})", flush=True)
+                r = None
+                continue
+            if r.status_code == 429 or r.status_code >= 500:
+                print(f"  {where}: Google returned {r.status_code}", flush=True)
+                continue
+            break
+        if r is None:
+            raise SourceError(f"{where}: Google Sheets did not answer after {1 + len(self.RETRY_WAITS)} attempts")
         if r.status_code == 403:
-            raise SourceError(f"permission denied: share the spreadsheet with {self.account} as Viewer")
+            raise SourceError(f"{where}: permission denied: share the spreadsheet with {self.account} as Viewer")
         if r.status_code == 404:
-            raise SourceError("spreadsheet or worksheet not found")
+            raise SourceError(f"{where}: spreadsheet or worksheet not found")
         if r.status_code >= 400:
-            raise SourceError(f"Google Sheets API error {r.status_code}")
+            raise SourceError(f"{where}: Google Sheets API error {r.status_code}")
         return r.json()
 
     def read(self, spreadsheet_id: str, worksheet: str, columns: list[str]) -> pd.DataFrame:
         where = f"{worksheet}"
-        head = self._get(f"{API}/{spreadsheet_id}/values/{_q(worksheet)}!1:1", {"valueRenderOption": "UNFORMATTED_VALUE"})
+        head = self._get(f"{API}/{spreadsheet_id}/values/{_q(worksheet)}!1:1", {"valueRenderOption": "UNFORMATTED_VALUE"}, where)
         header = (head.get("values") or [[]])[0]
         idx = header_index(header, columns, where)
         ranges = [f"{_q(worksheet)}!{_col_letter(i)}2:{_col_letter(i)}" for i in idx.values()]
         body = self._get(
             f"{API}/{spreadsheet_id}/values:batchGet",
             {"ranges": ranges, "majorDimension": "COLUMNS", "valueRenderOption": "UNFORMATTED_VALUE", "dateTimeRenderOption": "SERIAL_NUMBER"},
+            where,
         )
         cols = [((vr.get("values") or [[]])[0]) for vr in body.get("valueRanges", [])]
         n = max((len(c) for c in cols), default=0)
@@ -102,7 +127,7 @@ class GoogleSheetsSource:
         return df
 
     def count_rows(self, spreadsheet_id: str, worksheet: str, has_header: bool) -> int:
-        body = self._get(f"{API}/{spreadsheet_id}/values/{_q(worksheet)}!A:E", {"valueRenderOption": "UNFORMATTED_VALUE"})
+        body = self._get(f"{API}/{spreadsheet_id}/values/{_q(worksheet)}!A:E", {"valueRenderOption": "UNFORMATTED_VALUE"}, worksheet)
         rows = body.get("values", [])
         if has_header:
             rows = rows[1:]
@@ -161,10 +186,12 @@ def read_all(cfg: dict, source) -> tuple[dict[str, pd.DataFrame], dict[str, int]
             if v is None:
                 continue
             cols.extend(v if isinstance(v, list) else [v])
+        print(f"reading {key} / {s['worksheet']} ({len(cols)} columns)", flush=True)
         if isinstance(source, LocalSource):
             tables[key] = source.read_key(key, s["worksheet"], cols)
         else:
             tables[key] = source.read(s["spreadsheet_id"], s["worksheet"], cols)
+        print(f"  {key}: {len(tables[key])} rows", flush=True)
         ct = s.get("closed_tab")
         if ct and cfg["validation"].get("closed_tab_cross_check"):
             if isinstance(source, LocalSource):

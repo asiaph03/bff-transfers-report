@@ -168,7 +168,16 @@ def main(argv=None) -> int:
             return 1
         print("config OK")
         return 0
-    return run(args)
+    try:
+        return run(args)
+    except Exception as e:  # never leave a run without a report; never print data or secrets
+        out = Path(args.out)
+        out.mkdir(parents=True, exist_ok=True)
+        if (out / "site").exists():
+            shutil.rmtree(out / "site")
+        rep = validate.Report()
+        rep.check(False, "build completed", f"unexpected {type(e).__name__} in {e.__traceback__.tb_frame.f_code.co_filename.rsplit('/', 1)[-1] if e.__traceback__ else 'build'}")
+        return finish(rep, {"build stopped (UTC)": dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat()}, out, None)
 
 
 if __name__ == "__main__":
