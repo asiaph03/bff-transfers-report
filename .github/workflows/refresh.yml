@@ -1,0 +1,111 @@
+name: Refresh dashboard
+
+# Manual only. There is no schedule: data is fetched and published only when
+# someone runs this workflow from the Actions tab (or with `gh workflow run`).
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "preview = build and validate only; publish = also deploy to GitHub Pages"
+        type: choice
+        options: [preview, publish]
+        default: preview
+      first_release:
+        description: "Only for the first approved publication (no published baseline exists yet)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pages-production
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Test, fetch, calculate and validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pipeline/requirements.txt
+
+      - name: Install
+        run: pip install -r pipeline/requirements.txt
+
+      - name: Rule tests (synthetic data)
+        run: python -m pytest -q pipeline/test_rules.py
+
+      - name: Check config
+        run: python -m pipeline.build --check-config
+
+      - name: Fetch Google Sheets, calculate, validate
+        env:
+          GOOGLE_SA_KEY: ${{ secrets.GOOGLE_SA_KEY }}
+        run: |
+          set -o pipefail
+          FLAGS=""
+          if [ "${{ inputs.mode }}" = "preview" ]; then FLAGS="--preview"; fi
+          if [ "${{ inputs.first_release }}" = "true" ]; then
+            if [ "${{ inputs.mode }}" != "publish" ]; then echo "first_release only applies to publish"; exit 1; fi
+            FLAGS="$FLAGS --first-release"
+          fi
+          python -m pipeline.build --out out $FLAGS
+
+      - name: Validation report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: validation-report
+          path: out/validation.md
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Write report to the run summary
+        if: always()
+        run: if [ -f out/validation.md ]; then cat out/validation.md >> "$GITHUB_STEP_SUMMARY"; fi
+
+      - name: Site preview (for review)
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: site-preview
+          path: out/site
+          include-hidden-files: true
+          retention-days: 14
+
+      - name: Package for GitHub Pages
+        if: success() && inputs.mode == 'publish'
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: out/site
+
+  deploy:
+    name: Publish to GitHub Pages
+    needs: build
+    if: inputs.mode == 'publish'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
+
+      - name: Check the live page
+        run: |
+          for i in 1 2 3 4 5 6; do
+            if curl -fsS "${{ steps.deployment.outputs.page_url }}summary.json" -o live.json; then break; fi
+            sleep 10
+          done
+          python3 -c "import json;d=json.load(open('live.json'));print('live refreshed_at', d['refreshed_at']);print('live totals', {k:d['totals'][k] for k in ('leads','closed','active','debt_enrolled')})"

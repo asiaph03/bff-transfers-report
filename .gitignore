@@ -1,0 +1,12 @@
+# build output: never commit generated lead data
+out/
+out_*/
+# credentials and local exports
+*.json.key
+service-account*.json
+*credentials*.json
+local_files*.json
+*.xlsx
+*.csv
+__pycache__/
+.pytest_cache/

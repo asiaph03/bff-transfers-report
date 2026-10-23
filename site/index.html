@@ -1,0 +1,438 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Two Minute Transfers</title>
+<meta name="robots" content="noindex">
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600&display=swap">
+<style>
+/* Layout: one centred column of cards; serif for big figures, sans for everything else. */
+:root {
+  --font-sans: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-serif: "Source Serif 4", Georgia, "Times New Roman", serif;
+  --bg: #f6f7f9; --color-panel: #ffffff; --color-fg: #17202b; --color-fg-muted: #5b6676; --color-border-line: #dde2e9;
+  --c1: #2f6fd6; --c2: #e0892b; --color-ok: #1d7f4e; --color-bad: #c2382f;
+  --cds-chart-muted: #c9d1dc; --cds-chart-grid: #e8ecf1; --cds-chart-reference: #9aa5b4; --cds-chart-status-critical: #d9534a;
+  --cds-surface-popover: #ffffff; --cds-border: #d3d9e2; --cds-shadow-popover: 0 6px 20px rgba(20,30,45,.12); --cds-text-secondary: #5b6676;
+  --cds-font-size-caption: .8125rem; --cds-font-size-body: .9375rem; --cds-font-size-heading: 1.0625rem; --cds-font-size-title: 2rem; --cds-font-weight-medium: 600;
+  --cds-gap-xs: .25rem; --cds-gap-sm: .5rem; --cds-gap-md: 1rem; --cds-gap-lg: 1.5rem;
+  --cds-pad-xs: .25rem; --cds-pad-sm: .5rem; --cds-pad-md: .75rem; --cds-pad-lg: 1.25rem; --cds-radius: 10px;
+  --cds-dur-slow: .6s; --cds-ease-out: cubic-bezier(.2,.7,.2,1);
+}
+@media (prefers-color-scheme: dark) { :root {
+  --bg: #0f141b; --color-panel: #161d26; --color-fg: #e6ebf1; --color-fg-muted: #9aa6b5; --color-border-line: #2a3441;
+  --c1: #6ea2f5; --c2: #f0a35a; --color-ok: #4cc28a; --color-bad: #f07067;
+  --cds-chart-muted: #3a4655; --cds-chart-grid: #222b36; --cds-chart-reference: #6b7787; --cds-chart-status-critical: #e8665d;
+  --cds-surface-popover: #1d2530; --cds-border: #334050; --cds-shadow-popover: 0 6px 20px rgba(0,0,0,.45); --cds-text-secondary: #9aa6b5;
+  color-scheme: dark; } }
+html { background: var(--bg); }
+body { margin: 0; background: var(--bg); color: var(--color-fg); font-family: var(--font-sans); font-size: var(--cds-font-size-body); padding-block: 1.5rem 2.5rem; padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); }
+.tm-stale { margin: var(--cds-gap-xs) 0 0; font-size: var(--cds-font-size-caption); color: var(--color-bad); }
+.tm-warn { margin: 0; padding-left: 1.1rem; }
+.tm-banner { background: var(--color-panel); border: 1px solid var(--color-border-line); border-radius: var(--cds-radius); padding: var(--cds-pad-lg); }
+.tm-banner.err { border-color: var(--color-bad); color: var(--color-bad); }
+
+.tm { font-family: var(--font-sans); display: grid; gap: var(--cds-gap-lg); max-width: 84rem; margin-inline: auto; }
+.tm-head { display: flex; flex-wrap: wrap; gap: var(--cds-gap-md); align-items: flex-end; justify-content: space-between; }
+.tm-head h1 { font-family: var(--font-serif); font-weight: 400; font-size: var(--cds-font-size-title); margin: 0; text-wrap: balance; }
+.tm-sub { color: var(--color-fg-muted); font-size: var(--cds-font-size-caption); margin: var(--cds-gap-xs) 0 0; }
+.tm-take { margin: var(--cds-gap-sm) 0 0; font-size: var(--cds-font-size-body); max-width: 60ch; }
+.tm-take b { font-weight: 600; }
+.tm-controls { display: flex; flex-wrap: wrap; gap: var(--cds-gap-sm); align-items: center; }
+.tm-controls label { font-size: var(--cds-font-size-caption); color: var(--color-fg-muted); }
+.tm-controls select, .tm-btn { font: inherit; font-size: var(--cds-font-size-body); color: var(--color-fg); background: var(--color-panel); border: 1px solid var(--color-border-line); border-radius: var(--cds-radius); padding: var(--cds-pad-xs) var(--cds-pad-sm); cursor: pointer; }
+.tm-btn[aria-pressed="true"] { border-color: var(--color-fg); font-weight: 600; }
+.tm-btn:focus-visible, .tm-controls select:focus-visible { outline: 2px solid var(--color-fg); outline-offset: 2px; }
+.tm-kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 11rem), 1fr)); gap: var(--cds-gap-md); }
+.tm-kpi, .tm-card { background: var(--color-panel); border: 1px solid var(--color-border-line); border-radius: var(--cds-radius); padding: var(--cds-pad-lg); min-width: 0; }
+.tm-kpi .lbl { font-size: var(--cds-font-size-caption); color: var(--color-fg-muted); letter-spacing: .02em; }
+.tm-kpi .val { font-family: var(--font-serif); font-weight: 400; font-size: var(--cds-font-size-title); font-variant-numeric: tabular-nums; margin-top: var(--cds-gap-xs); min-height: 1.3em; }
+.tm-kpi .note { font-size: var(--cds-font-size-caption); color: var(--color-fg-muted); margin-top: var(--cds-gap-xs); font-variant-numeric: tabular-nums; }
+.tm-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 26rem), 1fr)); gap: var(--cds-gap-md); }
+.tm-card h2 { font-size: var(--cds-font-size-heading); font-weight: var(--cds-font-weight-medium); margin: 0; }
+.tm-card .cnote { font-size: var(--cds-font-size-caption); color: var(--color-fg-muted); margin: var(--cds-gap-xs) 0 var(--cds-gap-md); }
+.tm-cardhead { display: flex; justify-content: space-between; gap: var(--cds-gap-sm); flex-wrap: wrap; align-items: flex-start; }
+.tm-chart { position: relative; min-height: 15rem; }
+.tm-chart svg { display: block; overflow: visible; }
+.tm-chart text { font-family: var(--font-sans); font-size: var(--cds-font-size-caption); fill: var(--color-fg-muted); }
+.tm-chart .strong { fill: var(--color-fg); font-weight: 600; }
+.tm-tip { position: absolute; pointer-events: none; background: var(--cds-surface-popover); border: 1px solid var(--cds-border); border-radius: var(--cds-radius); box-shadow: var(--cds-shadow-popover); padding: var(--cds-pad-xs) var(--cds-pad-sm); font-size: var(--cds-font-size-caption); white-space: nowrap; z-index: 2; }
+.tm-tip .d { color: var(--cds-text-secondary); margin-bottom: 2px; }
+.tm-tip .sw { display: inline-block; width: .6rem; height: .6rem; border-radius: 2px; margin-right: .35rem; vertical-align: middle; }
+.tm-agentbar { cursor: pointer; }
+.tm-tablewrap { overflow-x: auto; }
+.tm table { width: 100%; border-collapse: collapse; font-size: var(--cds-font-size-body); font-variant-numeric: tabular-nums; }
+.tm th { text-align: left; font-weight: var(--cds-font-weight-medium); font-size: var(--cds-font-size-caption); color: var(--color-fg-muted); border-bottom: 1px solid var(--color-border-line); padding: var(--cds-pad-xs) var(--cds-pad-sm); white-space: nowrap; }
+.tm td { border-bottom: 1px solid var(--color-border-line); padding: var(--cds-pad-sm); white-space: nowrap; }
+.tm td.num, .tm th.num { text-align: right; }
+.tm .pill { display: inline-block; padding: 1px var(--cds-pad-sm); border-radius: 999px; border: 1px solid var(--color-border-line); font-size: var(--cds-font-size-caption); }
+.tm .pill.ok { color: var(--color-ok); border-color: currentColor; }
+.tm .pill.bad { color: var(--color-bad); border-color: currentColor; }
+.tm-foot { font-size: var(--cds-font-size-caption); color: var(--color-fg-muted); display: grid; gap: var(--cds-gap-xs); max-width: 80ch; }
+.tm-empty { font-size: var(--cds-font-size-caption); color: var(--color-fg-muted); padding: var(--cds-pad-md) 0; }
+[data-dash-source-state=empty] { color: transparent; }
+[data-dash-source-state=refreshing] { opacity: .5; transition: opacity var(--cds-dur-slow); }
+.tm-fail { display: flex; align-items: center; justify-content: center; gap: .5rem; min-height: inherit; color: var(--color-fg-muted); font-size: var(--cds-font-size-caption); }
+.tm-fail::before { content: ""; width: .375rem; height: .375rem; border-radius: 50%; background: var(--color-bad); }
+@media (prefers-reduced-motion: no-preference) {
+  .tm-grow { animation: tmgrow var(--cds-dur-slow) var(--cds-ease-out) both; transform-origin: left center; }
+  @keyframes tmgrow { from { transform: scaleX(0); } to { transform: scaleX(1); } }
+}
+</style>
+</head><body>
+<script src="vendor/d3.v7.8.5.min.js"></script>
+<script>
+/* Data layer: loads data.json and summary.json published with this page, derives the tables, holds filters. */
+window.dash = (() => {
+  let LEADS = null, SUMMARY = null, state = 'loading';
+  const calcs = {}; const cache = {}; const subs = []; let params = {};
+  const run = () => { for (const [id, c] of Object.entries(calcs)) cache[id] = c.fn(...c.inputs.map((i) => (i === 'leads' ? LEADS : cache[i]))); };
+  const fire = () => subs.forEach((f) => f());
+  let t; window.addEventListener('resize', () => { clearTimeout(t); t = setTimeout(fire, 120); });
+  const api = {
+    colors: ['var(--c1)', 'var(--c2)'],
+    calc(id, o) { calcs[id] = o; },
+    data(id) {
+      if (state !== 'ok') return { status: state, data: [] };
+      const d = id === 'leads' ? LEADS : cache[id];
+      return d ? { status: 'ok', data: d } : { status: 'missing', data: [] };
+    },
+    summary() { return SUMMARY; },
+    onData(fn) { subs.push(fn); fn(); },
+    params() { return { ...params }; },
+    setParams(p) { params = { ...params, ...p }; fire(); },
+    resetParams() { params = {}; },
+  };
+  Promise.all([fetch('data.json', { cache: 'no-store' }), fetch('summary.json', { cache: 'no-store' })])
+    .then(async ([d, s]) => { if (!d.ok || !s.ok) throw new Error('HTTP ' + d.status + '/' + s.status); return [await d.json(), await s.json()]; })
+    .then(([d, s]) => {
+      if (!Array.isArray(d.rows) || d.refreshed_at !== s.refreshed_at) throw new Error('data and summary do not match');
+      LEADS = d.rows; SUMMARY = s; state = 'ok'; run(); fire(); showMeta(s);
+    })
+    .catch(() => { state = 'error'; fire(); showMeta(null); });
+  function showMeta(s) {
+    const el = document.querySelector('.w-refresh'); const st = document.getElementById('stale'); const w = document.getElementById('warnings');
+    if (!s) {
+      el.textContent = 'data could not be loaded';
+      const b = document.createElement('div'); b.className = 'tm-banner err'; b.setAttribute('role', 'alert');
+      b.textContent = "The dashboard data couldn't be loaded. Reload the page; if it keeps failing, the last refresh may not have published.";
+      document.querySelector('.tm').prepend(b); return;
+    }
+    const at = new Date(s.refreshed_at);
+    el.textContent = 'data refreshed ' + at.toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' });
+    const days = (Date.now() - at.getTime()) / 86400000;
+    if (days > (s.stale_after_days || 14)) { st.hidden = false; st.textContent = `This data is ${Math.floor(days)} days old. Ask for a refresh to see current numbers.`; }
+    if (s.warnings && s.warnings.length) { w.hidden = false; w.replaceChildren(...s.warnings.map((x) => { const li = document.createElement('li'); li.textContent = x; return li; })); }
+  }
+  return api;
+})();
+</script>
+
+
+<main class="tm">
+  <header class="tm-head" id="overview">
+    <div>
+      <h1>Two Minute Transfers</h1>
+      <p class="tm-sub" id="window">Last 300 paid leads · <span class="w-first">—</span> to <span class="w-last">—</span> · <span class="w-refresh">loading data…</span></p>
+      <p class="tm-stale" id="stale" hidden></p>
+      <p class="tm-take" id="takeaway"><span class="t-closed">—</span> of <span class="t-leads">—</span> paid leads closed (<span class="t-rate">—</span>), <span class="t-debt">—</span> of debt enrolled. <span class="t-extra"></span></p>
+    </div>
+    <div class="tm-controls">
+      <label for="tm-agent">Agent</label>
+      <select id="tm-agent" class="tm-agent"></select>
+      <button type="button" class="tm-btn tm-reset" id="tm-reset">Reset</button>
+    </div>
+  </header>
+
+  <section class="tm-kpis" id="kpis" aria-label="Headline figures">
+    <div class="tm-kpi"><div class="lbl">Closed deals</div><div class="val"><span class="k-closed">—</span></div><div class="note"><span class="k-closerate">—</span> of paid leads · <span class="k-active">—</span> still active</div></div>
+    <div class="tm-kpi"><div class="lbl">Debt enrolled</div><div class="val"><span class="k-debt">—</span></div><div class="note">avg <span class="k-avgdebt">—</span> · <span class="k-debtknown">—</span> closes with a debt figure</div></div>
+    <div class="tm-kpi"><div class="lbl">Paid leads</div><div class="val"><span class="k-leads">—</span></div><div class="note">Ringba calls with a payout</div></div>
+    <div class="tm-kpi"><div class="lbl">Answered by an agent</div><div class="val"><span class="k-answered">—</span></div><div class="note"><span class="k-ansrate">—</span> of paid leads, in RingCX</div></div>
+    <div class="tm-kpi"><div class="lbl">Ringba payout per close</div><div class="val"><span class="k-ppc">—</span></div><div class="note"><span class="k-payout">—</span> total payout</div></div>
+  </section>
+
+  <div class="tm-grid">
+    <section class="tm-card" id="funnel">
+      <h2>Where leads drop off</h2>
+      <p class="cnote">Each step counts paid leads that reached it. The biggest drop is in red.</p>
+      <div class="tm-chart tm-funnel"></div>
+    </section>
+    <section class="tm-card" id="trend">
+      <div class="tm-cardhead">
+        <div><h2>Paid leads and closes over time</h2><p class="cnote">By the date of the paid Ringba call. Grey: paid leads. Blue: answered. Number above: closes.</p></div>
+        <div class="tm-controls" role="group" aria-label="Period">
+          <button type="button" class="tm-btn tm-grain" id="g-week" data-grain="week">Weekly</button>
+          <button type="button" class="tm-btn tm-grain" id="g-month" data-grain="month">Monthly</button>
+        </div>
+      </div>
+      <div class="tm-chart tm-trend"></div>
+    </section>
+  </div>
+
+  <div class="tm-grid">
+    <section class="tm-card" id="agents">
+      <h2>Per agent</h2>
+      <p class="cnote">Agent who answered the transfer in RingCX. Bar: paid leads answered. Click a bar to filter the page.</p>
+      <div class="tm-chart tm-agents"></div>
+    </section>
+    <section class="tm-card" id="lenders">
+      <h2>By lender</h2>
+      <p class="cnote">A lead can be on file at more than one lender. Closes count once, at the first lender that enrolled it.</p>
+      <div class="tm-tablewrap">
+        <table class="tm-lenders">
+          <thead><tr><th>Lender</th><th class="num">Leads on file</th><th class="num">Closed</th><th class="num">Active</th><th class="num">Debt enrolled</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+  </div>
+
+  <section class="tm-card" id="closed-deals">
+    <h2>Closed deals</h2>
+    <p class="cnote">Lender record submitted on or after the paid call. Status is the lender's current one.</p>
+    <div class="tm-tablewrap">
+      <table class="tm-deals">
+        <thead><tr><th>Lead</th><th>Paid call</th><th>Agent</th><th>Lender</th><th>Status</th><th class="num">Days to close</th><th class="num">Debt enrolled</th><th>Lender agent</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+    <p class="tm-empty tm-deals-empty" hidden>No closed deals for this agent in the last 300 paid leads.</p>
+  </section>
+
+  <footer class="tm-foot" id="notes">
+    <div>Paid leads are the most recent Ringba Two Minute Transfers calls with a buyer conversion amount above $0, one per phone (the latest paid call). Agent is the first accepted RingCX call on or after the paid-call date; leads paid before the RingCX log starts show "Before RingCX log". Closed deals use each lender's own Closed-tab status list (Citizen, Cordoba, DebtBlue), counted once at the earliest close on or after the paid-call date; "active" leaves out cancelled, returned and dropped deals.</div>
+    <div>Debt enrolled is the lender's enrolled-debt field. DebtBlue records carry no debt amount. Payout is the Ringba buyer conversion amount.</div>
+    <ul class="tm-warn" id="warnings" hidden></ul>
+  </footer>
+</main>
+
+<script>
+const num = (v) => (v === '' || v == null ? 0 : Number(v));
+dash.calc('summary', {
+  inputs: ['leads'],
+  title: 'Totals by agent',
+  description: 'Funnel counts, debt and payout for all leads and for each answering agent.',
+  fn: (leads) => {
+    const n = (v) => (v === '' || v == null ? 0 : Number(v));
+    const groups = new Map([['All', leads]]);
+    for (const r of leads) { if (!groups.has(r.agent)) groups.set(r.agent, []); groups.get(r.agent).push(r); }
+    return [...groups].map(([agent, rs]) => {
+      const sum = (k) => rs.reduce((a, r) => a + n(r[k]), 0);
+      const closed = sum('closed'), leadsN = rs.length, answered = sum('answered'), payout = sum('payout');
+      const debt = sum('debt_enrolled'), debtKnown = rs.filter((r) => Number(r.closed) === 1 && r.debt_enrolled != null && r.debt_enrolled !== '').length;
+      const dates = rs.map((r) => r.paid_call).sort();
+      return { agent, leads: leadsN, connected: sum('connected'), answered, converted: sum('converted'), in_crm: sum('in_lender_crm'),
+        closed, active: sum('active'), debt, debt_known: debtKnown, payout,
+        answer_rate: leadsN ? answered / leadsN : 0, close_rate: leadsN ? closed / leadsN : 0,
+        avg_debt: debtKnown ? debt / debtKnown : 0, payout_per_close: closed ? payout / closed : 0,
+        paid_call_min: dates[0] ?? '', paid_call_max: dates[dates.length - 1] ?? '' };
+    });
+  },
+});
+dash.calc('trend', {
+  inputs: ['leads'],
+  title: 'Leads and closes by period',
+  description: 'Leads, answered leads, closes and debt per week and per month of first call, for all leads and each agent.',
+  fn: (leads) => {
+    const n = (v) => (v === '' || v == null ? 0 : Number(v));
+    const out = new Map();
+    for (const r of leads) for (const agent of ['All', r.agent]) for (const [grain, period] of [['week', r.week_start], ['month', r.month]]) {
+      const k = agent + '|' + grain + '|' + period;
+      if (!out.has(k)) out.set(k, { agent, grain, period, leads: 0, answered: 0, closed: 0, debt: 0 });
+      const o = out.get(k); o.leads += 1; o.answered += n(r.answered); o.closed += n(r.closed); o.debt += n(r.debt_enrolled);
+    }
+    return [...out.values()].sort((a, b) => (a.period < b.period ? -1 : 1));
+  },
+});
+dash.calc('lenders', {
+  inputs: ['leads'],
+  title: 'Totals by lender',
+  description: 'Leads on file, closes and debt for each lender, for all leads and each agent.',
+  fn: (leads) => {
+    const n = (v) => (v === '' || v == null ? 0 : Number(v));
+    const cols = { Citizen: 'in_citizen', Cordoba: 'in_cordoba', DebtBlue: 'in_debtblue' };
+    const out = [];
+    for (const agent of ['All', ...new Set(leads.map((r) => r.agent))]) {
+      const rs = agent === 'All' ? leads : leads.filter((r) => r.agent === agent);
+      for (const lender of Object.keys(cols)) {
+        const c = rs.filter((r) => r.close_lender === lender);
+        out.push({ key: agent + '|' + lender, agent, lender, in_crm: rs.reduce((a, r) => a + n(r[cols[lender]]), 0),
+          closed: c.length, active: c.filter((r) => Number(r.active) === 1).length, debt: c.reduce((a, r) => a + n(r.debt_enrolled), 0) });
+      }
+    }
+    return out;
+  },
+});
+</script>
+
+<script>
+const fInt = d3.format(','), fPct = d3.format('.1%'), fUsd = d3.format('$,.0f'), fUsd2 = d3.format('$,.2f');
+const fDay = d3.utcFormat('%b %-d'), fDayY = d3.utcFormat('%b %-d, %Y'), fMon = d3.utcFormat('%b %Y');
+const parseT = (s) => new Date(s.slice(0, 19) + 'Z');
+const sel = document.querySelector('.tm-agent');
+const setDefaults = () => dash.setParams({ agent: 'All', grain: 'week' });
+if (!dash.params().agent) setDefaults();
+sel.addEventListener('change', () => dash.setParams({ agent: sel.value }));
+document.querySelector('.tm-reset').addEventListener('click', () => { dash.resetParams(); setDefaults(); });
+document.querySelectorAll('.tm-grain').forEach((b) => b.addEventListener('click', () => dash.setParams({ grain: b.dataset.grain })));
+
+function tipper(box) {
+  let tip = box.querySelector('.tm-tip');
+  if (!tip) { tip = document.createElement('div'); tip.className = 'tm-tip'; tip.hidden = true; box.appendChild(tip); }
+  return {
+    show(ev, head, lines) {
+      tip.replaceChildren();
+      const d = document.createElement('div'); d.className = 'd'; d.textContent = head; tip.appendChild(d);
+      for (const [color, text] of lines) {
+        const l = document.createElement('div');
+        if (color) { const s = document.createElement('span'); s.className = 'sw'; s.style.background = color; l.appendChild(s); }
+        l.appendChild(document.createTextNode(text)); tip.appendChild(l);
+      }
+      tip.hidden = false;
+      const b = box.getBoundingClientRect(); const w = tip.offsetWidth, h = tip.offsetHeight;
+      let x = ev.clientX - b.left + 12, y = ev.clientY - b.top - h - 8;
+      if (x + w > b.width) x = Math.max(0, ev.clientX - b.left - w - 12);
+      if (y < 0) y = ev.clientY - b.top + 12;
+      tip.style.left = x + 'px'; tip.style.top = y + 'px';
+    },
+    hide() { tip.hidden = true; },
+  };
+}
+function failed(el) { el.replaceChildren(); const d = document.createElement('div'); d.className = 'tm-fail'; d.textContent = 'Failed to load'; el.appendChild(d); }
+const markWhere = (root, where) => root.querySelectorAll('[data-source="summary"][data-field]').forEach((el) => el.setAttribute('data-where', where));
+const enc = (s) => encodeURIComponent(s);
+
+function drawFunnel(el, s) {
+  el.replaceChildren();
+  const steps = [['Paid leads', s.leads], ['Answered in RingCX', s.answered], ['On file at a lender', s.in_crm], ['Closed', s.closed], ['Still active', s.active]];
+  const W = el.clientWidth;
+  const probe = d3.select(el).append('svg').attr('width', 0).attr('height', 0).append('text').text('Connected in Ringba');
+  const need = probe.node().getComputedTextLength() + 14; probe.node().parentNode.remove();
+  const stack = need > W * 0.4, rowH = stack ? 50 : 44, H = steps.length * rowH;
+  const svg = d3.select(el).append('svg').attr('width', '100%').attr('viewBox', `0 0 ${W} ${H}`).attr('height', H);
+  const labW = stack ? 0 : need, valW = 120, by = stack ? 20 : 10, ty = stack ? 13 : 24;
+  const x = d3.scaleLinear([0, steps[0][1] || 1], [0, Math.max(10, W - labW - valW)]);
+  let worst = -1, worstLoss = -1;
+  steps.forEach((st, i) => { if (i > 0) { const loss = steps[i - 1][1] - st[1]; const share = steps[i - 1][1] ? loss / steps[i - 1][1] : 0; if (share > worstLoss) { worstLoss = share; worst = i; } } });
+  steps.forEach(([name, v], i) => {
+    const y = i * rowH;
+    svg.append('text').attr('x', 0).attr('y', y + ty).text(name).attr('class', i === 3 ? 'strong' : null);
+    svg.append('rect').attr('class', 'tm-grow').attr('x', labW).attr('y', y + by).attr('height', 22).attr('rx', 4)
+      .attr('width', Math.max(2, x(v))).attr('fill', i === worst ? 'var(--cds-chart-status-critical)' : (i >= 3 ? dash.colors[0] : 'var(--cds-chart-muted)'));
+    const prev = i > 0 ? steps[i - 1][1] : 0;
+    const lost = i === 4 ? (prev ? ` · ${fPct(v / prev)} of closes` : '') : (i > 0 && prev ? ` · −${fPct((prev - v) / prev)}` : '');
+    svg.append('text').attr('x', labW + Math.max(2, x(v)) + 8).attr('y', y + by + 15).text(fInt(v) + lost).attr('class', 'strong');
+  });
+}
+
+function drawTrend(el, rows, grain) {
+  el.replaceChildren();
+  const T = tipper(el);
+  const data = rows.map((r) => ({ ...r, date: new Date(r.period.length === 7 ? r.period + '-01T00:00:00Z' : r.period + 'T00:00:00Z') }));
+  if (!data.length) { const p = document.createElement('div'); p.className = 'tm-empty'; p.textContent = 'No leads for this agent.'; el.appendChild(p); return; }
+  const W = el.clientWidth, H = 240, m = { t: 26, r: 8, b: 26, l: 36 };
+  const svg = d3.select(el).append('svg').attr('width', '100%').attr('viewBox', `0 0 ${W} ${H}`).attr('height', H);
+  const x = d3.scaleBand(data.map((d) => d.period), [m.l, W - m.r]).padding(0.3);
+  const y = d3.scaleLinear([0, d3.max(data, (d) => d.leads) || 1], [H - m.b, m.t]).nice();
+  svg.append('g').selectAll('line').data(y.ticks(4)).join('line').attr('x1', m.l).attr('x2', W - m.r).attr('y1', y).attr('y2', y).attr('stroke', 'var(--cds-chart-grid)');
+  svg.append('g').selectAll('text').data(y.ticks(4)).join('text').attr('x', m.l - 6).attr('y', (d) => y(d) + 4).attr('text-anchor', 'end').text(fInt);
+  const fmt = grain === 'month' ? fMon : fDay;
+  const every = Math.max(1, Math.ceil((data.length * 52) / (W - m.l - m.r)));
+  svg.append('g').selectAll('text').data(data.filter((d, i) => i % every === 0)).join('text').attr('x', (d) => x(d.period) + x.bandwidth() / 2).attr('y', H - 8).attr('text-anchor', 'middle').text((d) => fmt(d.date));
+  const bw = Math.min(32, x.bandwidth());
+  const g = svg.append('g').selectAll('g').data(data).join('g').attr('transform', (d) => `translate(${x(d.period) + (x.bandwidth() - bw) / 2},0)`);
+  g.append('rect').attr('y', (d) => y(d.leads)).attr('height', (d) => y(0) - y(d.leads)).attr('width', bw).attr('rx', 4).attr('fill', 'var(--cds-chart-muted)');
+  g.append('rect').attr('x', bw * 0.2).attr('y', (d) => y(d.answered)).attr('height', (d) => y(0) - y(d.answered)).attr('width', bw * 0.6).attr('rx', 3).attr('fill', dash.colors[0]);
+  g.append('text').attr('x', bw / 2).attr('y', (d) => y(d.leads) - 6).attr('text-anchor', 'middle').attr('class', 'strong').text((d) => (d.closed ? fInt(d.closed) : ''));
+  g.append('rect').attr('width', bw).attr('y', m.t).attr('height', H - m.b - m.t).attr('fill', 'transparent')
+    .on('mousemove', (ev, d) => T.show(ev, (grain === 'month' ? fMon(d.date) : 'Week of ' + fDayY(d.date)), [
+      ['var(--cds-chart-muted)', `${fInt(d.leads)} leads`], [dash.colors[0], `${fInt(d.answered)} answered`],
+      [null, `${fInt(d.closed)} closed · ${fUsd(d.debt)} debt`]]))
+    .on('mouseleave', () => T.hide());
+}
+
+function drawAgents(el, rows, picked) {
+  el.replaceChildren();
+  const T = tipper(el);
+  const data = rows.filter((r) => r.agent !== 'All').sort((a, b) => b.leads - a.leads);
+  const W = el.clientWidth;
+  const probeSvg = d3.select(el).append('svg').attr('width', 0).attr('height', 0);
+  const need = d3.max(data, (d) => { const t = probeSvg.append('text').text(d.agent); const w = t.node().getComputedTextLength(); t.remove(); return w; }) + 12; probeSvg.remove();
+  const stack = need > W * 0.42, rowH = stack ? 40 : 30, H = data.length * rowH + 4;
+  const svg = d3.select(el).append('svg').attr('width', '100%').attr('viewBox', `0 0 ${W} ${H}`).attr('height', H);
+  const labW = stack ? 0 : need, by = stack ? 18 : 7, ty = stack ? 12 : 19;
+  const endW = 92;
+  const x = d3.scaleLinear([0, d3.max(data, (d) => d.leads) || 1], [0, Math.max(10, W - labW - endW)]);
+  const g = svg.selectAll('g').data(data).join('g').attr('class', 'tm-agentbar').attr('transform', (d, i) => `translate(0,${i * rowH})`)
+    .attr('opacity', (d) => (picked === 'All' || picked === d.agent ? 1 : 0.35))
+    .on('click', (ev, d) => dash.setParams({ agent: picked === d.agent ? 'All' : d.agent }))
+    .on('mousemove', (ev, d) => T.show(ev, d.agent, [[null, `${fInt(d.leads)} leads · ${fInt(d.closed)} closed (${fPct(d.close_rate)})`], [null, `${fUsd(d.debt)} debt · ${fUsd(d.payout)} payout`]]))
+    .on('mouseleave', () => T.hide());
+  g.append('text').attr('x', 0).attr('y', ty).text((d) => d.agent).attr('class', (d) => (d.closed ? 'strong' : null));
+  g.append('rect').attr('class', 'tm-grow').attr('x', labW).attr('y', by).attr('height', 16).attr('rx', 4).attr('width', (d) => Math.max(2, x(d.leads)))
+    .attr('fill', (d) => (d.agent === 'No RingCX answer' || d.agent === 'Before RingCX log' ? 'var(--cds-chart-reference)' : (d.closed ? dash.colors[0] : 'var(--cds-chart-muted)')));
+  g.append('text').attr('x', (d) => labW + Math.max(2, x(d.leads)) + 6).attr('y', by + 12).text((d) => `${fInt(d.leads)}${d.closed ? ' · ' + d.closed + ' closed' : ''}`);
+}
+
+function fillLenders(table, rows) {
+  const tb = table.querySelector('tbody'); tb.replaceChildren();
+  for (const r of rows) {
+    const tr = document.createElement('tr'); tr.dataset.key = r.key;
+    for (const [v, cls] of [[r.lender, ''], [fInt(r.in_crm), 'num'], [fInt(r.closed), 'num'], [fInt(r.active), 'num'], [r.debt ? fUsd2(r.debt) : '—', 'num']]) {
+      const td = document.createElement('td'); td.textContent = v; if (cls) td.className = cls; tr.appendChild(td);
+    }
+    tb.appendChild(tr);
+  }
+}
+
+function fillDeals(table, rows) {
+  const tb = table.querySelector('tbody'); tb.replaceChildren();
+  for (const r of rows) {
+    const tr = document.createElement('tr');
+    const st = document.createElement('span'); st.className = 'pill ' + (Number(r.active) === 1 ? 'ok' : 'bad'); st.textContent = r.close_status;
+    const cells = [r.lead_id, fDayY(parseT(r.paid_call)), r.agent, r.close_lender, st, (r.days_to_close == null ? '—' : r.days_to_close), (r.debt_enrolled == null || r.debt_enrolled === '') ? '—' : fUsd2(Number(r.debt_enrolled)), r.lender_agent];
+    cells.forEach((v, i) => { const td = document.createElement('td'); if (v instanceof Node) td.appendChild(v); else td.textContent = v; if (i === 5 || i === 6) td.className = 'num'; tr.appendChild(td); });
+    tb.appendChild(tr);
+  }
+  document.querySelector('.tm-deals-empty').hidden = rows.length > 0;
+}
+
+dash.onData(() => {
+  const root = document.querySelector('.tm');
+  const p = dash.params(); const agent = p.agent || 'All'; const grain = p.grain || 'week';
+  document.querySelectorAll('.tm-grain').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.grain === grain)));
+  const S = dash.data('summary'), Tr = dash.data('trend'), Le = dash.data('lenders'), L = dash.data('leads');
+  const funnelEl = root.querySelector('.tm-funnel'), trendEl = root.querySelector('.tm-trend'), agentsEl = root.querySelector('.tm-agents');
+  if (S.status !== 'ok') {
+    if (S.status === 'error' || L.status === 'error') { [funnelEl, trendEl, agentsEl].forEach(failed); root.querySelectorAll('.dash-skeleton').forEach((e) => e.classList.remove('dash-skeleton')); }
+    return;
+  }
+  const rows = S.data.map((r) => ({ ...r }));
+  const opts = ['All', ...rows.filter((r) => r.agent !== 'All').sort((a, b) => b.leads - a.leads).map((r) => r.agent)];
+  sel.replaceChildren(...opts.map((a) => new Option(a === 'All' ? 'All agents' : a, a)));
+  sel.value = opts.includes(agent) ? agent : 'All';
+  const s = rows.find((r) => r.agent === sel.value) || rows[0];
+  markWhere(root, 'agent=' + enc(s.agent));
+  root.querySelectorAll('.dash-skeleton').forEach((e) => e.classList.remove('dash-skeleton'));
+  const put = (cls, v) => { const e = root.querySelector(cls); if (e) e.textContent = v; };
+  const all = rows.find((r) => r.agent === 'All');
+  put('.w-first', fDay(parseT(all.paid_call_min))); put('.w-last', fDayY(parseT(all.paid_call_max)));
+  put('.t-closed', fInt(s.closed)); put('.t-leads', fInt(s.leads)); put('.t-rate', fPct(s.close_rate)); put('.t-debt', fUsd(s.debt));
+  put('.k-closed', fInt(s.closed)); put('.k-closerate', fPct(s.close_rate)); put('.k-active', fInt(s.active));
+  put('.k-debt', fUsd(s.debt)); put('.k-avgdebt', fUsd(s.avg_debt)); put('.k-debtknown', `${fInt(s.debt_known)}`);
+  put('.k-leads', fInt(s.leads)); put('.k-answered', fInt(s.answered)); put('.k-ansrate', fPct(s.answer_rate));
+  put('.k-ppc', s.closed ? fUsd(s.payout_per_close) : '—'); put('.k-payout', fUsd(s.payout));
+  const lrows = Le.status === 'ok' ? Le.data.filter((r) => r.agent === s.agent) : [];
+  const top = lrows.slice().sort((a, b) => b.closed - a.closed)[0];
+  put('.t-extra', s.agent === 'All'
+    ? (top && top.closed ? `${top.lender} took ${top.closed} of the ${s.closed}; ${fInt(s.active)} are still active.` : '')
+    : `${s.agent} answered these leads in RingCX.`);
+  drawFunnel(funnelEl, s);
+  if (Tr.status === 'ok') drawTrend(trendEl, Tr.data.filter((r) => r.agent === s.agent && r.grain === grain), grain); else if (Tr.status === 'error') failed(trendEl);
+  drawAgents(agentsEl, rows, sel.value);
+  if (Le.status === 'ok') fillLenders(root.querySelector('.tm-lenders'), lrows);
+  if (L.status === 'ok') fillDeals(root.querySelector('.tm-deals'), L.data.filter((r) => Number(r.closed) === 1 && (s.agent === 'All' || r.agent === s.agent)).sort((a, b) => (a.paid_call < b.paid_call ? 1 : -1)));
+});
+</script>
+
+</body></html>

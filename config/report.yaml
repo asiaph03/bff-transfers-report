@@ -1,0 +1,142 @@
+# BFF Transfers report: sources and business rules.
+# Every rule the pipeline applies is read from this file. Change a value here,
+# commit it, then run the "Refresh dashboard" workflow by hand to publish.
+# Nothing refreshes or publishes on its own.
+
+version: 1
+
+report:
+  title: Two Minute Transfers
+  lead_label: paid leads
+  window_size: 300               # newest N unique paid leads
+  allow_fewer_than_window: false # true lets a run publish with fewer than window_size leads
+
+phone:
+  digits: 10                     # match on the last N digits, all non-digits removed
+  min_digits: 10                 # shorter numbers are treated as blank
+
+sources:
+  ringba:
+    spreadsheet_id: 1enoYbZv_cxx3C_ZrZYFU9rqfJTfwCRWfMF5kMJBpr4M
+    worksheet: Ringba2
+    columns:
+      call_id: inboundCallId
+      call_time: callDtReadable
+      phone: inboundPhoneNumber
+      payout: buyerConversionAmount
+      connected: buyerHasConnected
+      converted: buyerHasConverted
+    min_rows: 1000
+  ringcx:
+    spreadsheet_id: 1klDO_7CNnemoMs5S_pElC_6gIyylUn-SxxkbHv92iCc
+    worksheet: Two Minute Transfers
+    columns:
+      date: Date
+      result: Call Result
+      agent: Agent Full Name
+      phone: ANI
+    min_rows: 500
+  citizen:
+    spreadsheet_id: 1URGPKj596-RKXXHTB8o3JoYkaEen-Q2O4EVSTxwvoM8
+    worksheet: Affiliate_Clients
+    columns:
+      phones: [Phone]
+      status: Status Name
+      close_date: Submitted Date
+      debt: Total Enrolled Debt
+      agent: Assignees
+    min_rows: 10000
+    closed_tab: {worksheet: Closed, has_header: false}
+  cordoba:
+    spreadsheet_id: 16biH5xLWdtEBjcndrN0EdsY8mQBVtNxjd7cbov1-LqE
+    worksheet: Contacts
+    columns:
+      phones: [Home Phone, Cell Phone]
+      status: Status
+      close_date: Submitted Date
+      debt: Enrolled Debt
+      agent: Assigned To
+    min_rows: 1000
+    closed_tab: {worksheet: Closed, has_header: false}
+  debtblue:
+    spreadsheet_id: 1QnrVN9Nl5PUpIblpGmajV4SoLmkibw9M--t4LmL4pRU
+    worksheet: ContactsV2
+    columns:
+      phones: [Home Phone]
+      status: Stage
+      close_date: Created
+      debt: null                 # ContactsV2 has no debt field; do not substitute one
+      agent: Assigned To
+    min_rows: 50
+    closed_tab: {worksheet: Closed, has_header: true}
+
+paid_leads:
+  min_payout_exclusive: 0        # paid when payout > this value
+  dedupe: latest_paid_call_per_phone   # U1
+  sort_keys: [call_time, call_id]      # newest first by call_time, then call_id
+
+agent_match:
+  accepted_result: Inbound Accepted
+  rule: first_on_or_after_paid_date    # U2: ties on that date go to the first row in sheet order
+  aliases:                             # U3, compared in upper case
+    BEN HALL: BENJAMIN HALL
+  ringcx_log_start: 2026-04-01         # U5
+  label_before_log: Before RingCX log
+  label_not_answered: No RingCX answer
+
+lenders:
+  order: [citizen, cordoba, debtblue]  # display order; ties on close date go to this order
+  display_names: {citizen: Citizen, cordoba: Cordoba, debtblue: DebtBlue}
+  closed_statuses:                     # copied from each lender's Closed tab formula
+    citizen: [Enrolled, Submitted, Closed, Draft Recovery, Returned, Graduated, Paused, Cancelled]
+    cordoba: [Waiting For First Payment, Active, Cancelled, On Hold - NSF, Returned, Contract Needed, Submitted, Cancellation Review]
+    debtblue: [Enrolled, Contact, Submitted, Waiting on Deposit, File Returned, Dropped / Cancelled]
+  known_non_closing_statuses:          # U8; "" is a blank status
+    citizen: [Pending, ""]
+    cordoba: [""]
+    debtblue: [Contacted, Rejected, ""]
+  inactive_statuses: [Cancelled, Returned, Cancellation Review, File Returned, Dropped / Cancelled]  # U4
+  close_must_be_on_or_after_paid_date: true   # U6: calendar dates only
+  count_each_lead_once: earliest_close_date
+
+validation:
+  data_gaps:
+    warn_months_without_calls: true    # U7: a warning, not a failure
+  max_unparsed_paid_call_times: 0
+  closed_tab_cross_check: true         # status filter row count must equal the lender's Closed tab
+  baseline:                            # compared with the live summary.json
+    required: true                     # first publish only: run with first_release=true
+    metrics:
+      closed: {max_abs_change: 10, max_pct_change: 0.75}
+      active: {max_abs_change: 10, max_pct_change: 0.75}
+      debt_enrolled: {max_abs_change: 250000, max_pct_change: 0.75}
+      payout: {max_abs_change: 5000, max_pct_change: 0.75}
+      answered: {max_abs_change: 60, max_pct_change: 0.25}
+  stale_after_days: 14                 # the page warns when the data is older than this
+
+publish:
+  site_url: https://asiaph03.github.io/bff-transfers-report/
+  lead_id_prefix: P
+  fields:                              # the only fields written to the public data file
+    - lead_id
+    - paid_call
+    - week_start
+    - month
+    - ringba_calls
+    - connected
+    - converted
+    - payout
+    - answered
+    - agent
+    - in_lender_crm
+    - in_citizen
+    - in_cordoba
+    - in_debtblue
+    - closed
+    - active
+    - close_lender
+    - close_status
+    - close_date
+    - days_to_close
+    - debt_enrolled
+    - lender_agent
