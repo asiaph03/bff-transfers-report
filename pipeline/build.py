@@ -1,7 +1,7 @@
 """Build and validate the dashboard site.
 
     python -m pipeline.build --check-config
-    python -m pipeline.build --out out                       # reads Google Sheets (needs GOOGLE_SA_KEY)
+    python -m pipeline.build --out out                       # reads Google Sheets (needs GOOGLE_ACCESS_TOKEN)
     python -m pipeline.build --out out --local-files map.json  # development: exported copies
     python -m pipeline.build --out out --preview             # preview: missing baseline is only a warning
     python -m pipeline.build --out out --first-release       # only for the first approved publication

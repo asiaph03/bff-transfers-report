@@ -58,20 +58,21 @@ def header_index(header: list, wanted: list[str], where: str) -> dict[str, int]:
 
 
 class GoogleSheetsSource:
-    def __init__(self, key_json: str | None = None):
-        from google.oauth2 import service_account
-        from google.auth.transport.requests import AuthorizedSession
+    """Authenticates with a short-lived access token (keyless, from GitHub's OIDC sign-in to Google).
 
-        raw = key_json if key_json is not None else os.environ.get("GOOGLE_SA_KEY", "")
-        if not raw.strip():
-            raise SourceError("GOOGLE_SA_KEY is not set: add the service-account key as a GitHub secret")
-        try:
-            info = json.loads(raw)
-        except json.JSONDecodeError:
-            raise SourceError("GOOGLE_SA_KEY is not valid JSON") from None
-        creds = service_account.Credentials.from_service_account_info(info, scopes=[READONLY_SCOPE])
-        self.session = AuthorizedSession(creds)
-        self.account = info.get("client_email", "(unknown service account)")
+    GOOGLE_ACCESS_TOKEN: a read-only (spreadsheets.readonly) token minted for the service account by
+    google-github-actions/auth through Workload Identity Federation. No key file exists.
+    """
+
+    def __init__(self, access_token: str | None = None):
+        import requests
+
+        token = access_token if access_token is not None else os.environ.get("GOOGLE_ACCESS_TOKEN", "")
+        if not token.strip():
+            raise SourceError("GOOGLE_ACCESS_TOKEN is not set: the Google sign-in step did not run or failed")
+        self.session = requests.Session()
+        self.session.headers["Authorization"] = "Bearer " + token.strip()
+        self.account = os.environ.get("GOOGLE_SERVICE_ACCOUNT", "the dashboard service account")
 
     def _get(self, url: str, params: dict) -> dict:
         r = self.session.get(url, params=params, timeout=120)

@@ -27,6 +27,9 @@ jobs:
     name: Test, fetch, calculate and validate
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    permissions:
+      contents: read
+      id-token: write   # lets this job sign in to Google without a stored key
     steps:
       - uses: actions/checkout@v4
 
@@ -45,9 +48,21 @@ jobs:
       - name: Check config
         run: python -m pipeline.build --check-config
 
+      - name: Sign in to Google (keyless, read-only)
+        id: gauth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          service_account: ${{ vars.GCP_SERVICE_ACCOUNT }}
+          token_format: access_token
+          access_token_scopes: https://www.googleapis.com/auth/spreadsheets.readonly
+          access_token_lifetime: 900s
+          create_credentials_file: false
+
       - name: Fetch Google Sheets, calculate, validate
         env:
-          GOOGLE_SA_KEY: ${{ secrets.GOOGLE_SA_KEY }}
+          GOOGLE_ACCESS_TOKEN: ${{ steps.gauth.outputs.access_token }}
+          GOOGLE_SERVICE_ACCOUNT: ${{ vars.GCP_SERVICE_ACCOUNT }}
         run: |
           set -o pipefail
           FLAGS=""

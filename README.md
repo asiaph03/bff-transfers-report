@@ -57,25 +57,43 @@ Generated data is never committed. It exists only inside the workflow run and th
 
 ## One-time setup
 
-### 1. Google service account (read-only)
+### 1. Google service account (read-only, no key)
 
-1. Open https://console.cloud.google.com/ and create a project (for example `bff-transfers-report`).
-2. APIs & Services → Library → enable **Google Sheets API**.
-3. IAM & Admin → Service Accounts → **Create service account** (name `dashboard-reader`). Skip the role step.
-4. Open the account → Keys → Add key → **JSON**. A key file downloads. Treat it like a password; do not email it
-   or put it in the repository.
-5. Copy the account's email (it ends in `iam.gserviceaccount.com`).
-6. Share each of the five spreadsheets with that email as **Viewer** (Share → paste the email → Viewer →
-   untick "Notify").
+Key files are disabled on this Google Cloud organization (policy `iam.disableServiceAccountKeyCreation`), and
+none is needed: GitHub Actions signs in to Google with a short-lived token through Workload Identity Federation.
 
-### 2. GitHub secret
+1. Project `bff-transfers-report`, with the **Google Sheets API** enabled.
+2. Service account `dashboard-reader@bff-transfers-report.iam.gserviceaccount.com`, with no project roles.
+3. Share each of the five spreadsheets with that email as **Viewer** (untick "Notify").
+4. In Google Cloud Shell (the `>_` icon in the console), run:
 
-Repository → Settings → Secrets and variables → Actions → **New repository secret**:
+```
+PROJECT_ID=bff-transfers-report
+REPO=asiaph03/bff-transfers-report
+SA=dashboard-reader@$PROJECT_ID.iam.gserviceaccount.com
+PROJECT_NUMBER=$(gcloud projects describe $PROJECT_ID --format='value(projectNumber)')
+gcloud services enable iamcredentials.googleapis.com sts.googleapis.com --project $PROJECT_ID
+gcloud iam workload-identity-pools create github --project $PROJECT_ID --location global --display-name "GitHub Actions"
+gcloud iam workload-identity-pools providers create-oidc bff-repo --project $PROJECT_ID --location global \
+  --workload-identity-pool github --display-name "bff-transfers-report" \
+  --issuer-uri https://token.actions.githubusercontent.com \
+  --attribute-mapping "google.subject=assertion.sub,attribute.repository=assertion.repository,attribute.event_name=assertion.event_name" \
+  --attribute-condition "assertion.repository=='$REPO' && assertion.event_name=='workflow_dispatch'"
+gcloud iam service-accounts add-iam-policy-binding $SA --project $PROJECT_ID \
+  --role roles/iam.workloadIdentityUser \
+  --member "principalSet://iam.googleapis.com/projects/$PROJECT_NUMBER/locations/global/workloadIdentityPools/github/attribute.repository/$REPO"
+echo "GCP_WIF_PROVIDER = projects/$PROJECT_NUMBER/locations/global/workloadIdentityPools/github/providers/bff-repo"
+```
 
-- Name: `GOOGLE_SA_KEY`
-- Value: the whole content of the JSON key file
+Only manually started runs (`workflow_dispatch`) of this one repository can get a token, and the token
+is read-only for Sheets and lasts 15 minutes.
 
-Then delete the downloaded key file from your computer.
+### 2. GitHub repository variables (not secrets; nothing here is a password)
+
+Repository → Settings → Secrets and variables → Actions → **Variables** tab → New repository variable:
+
+- `GCP_WIF_PROVIDER`: the line the last command printed (after `=`)
+- `GCP_SERVICE_ACCOUNT`: `dashboard-reader@bff-transfers-report.iam.gserviceaccount.com`
 
 ### 3. GitHub Pages source (only when the first release is approved)
 
@@ -98,14 +116,14 @@ Actions → **Refresh dashboard** → Run workflow:
 Say **"Refresh the BFF Transfers dashboard now."** Claude then:
 
 1. Confirms the repository (`asiaph03/bff-transfers-report`) and branch (`main`).
-2. Checks that it can start workflows (GitHub CLI signed in on your computer) and that `GOOGLE_SA_KEY` exists.
+2. Checks that it can start workflows (GitHub CLI signed in on your computer) and that the two Google variables exist.
 3. Runs `gh workflow run refresh.yml -f mode=publish` and waits for it (`gh run watch`).
 4. Reads the job results and the validation report.
 5. Loads the live `summary.json` and checks its `refreshed_at` matches the run.
 6. Reports the refresh time, or what failed. It never says the dashboard was updated without that check.
 
 Claude needs the GitHub CLI signed in on your computer (`gh auth login`, done by you) with access to this
-repository. It never handles the Google key.
+repository. There is no Google key to handle.
 
 ## What is checked before publishing
 
@@ -148,7 +166,7 @@ not commit them.
 
 | Message | Fix |
 |---|---|
-| `GOOGLE_SA_KEY is not set` | Add the secret (setup step 2) |
+| `GOOGLE_ACCESS_TOKEN is not set` / Google sign-in step failed | Check the two repository variables (setup step 2) and the Workload Identity setup (step 1.4) |
 | `permission denied: share the spreadsheet with … as Viewer` | Share that sheet with the service-account email |
 | `missing column(s)` / `used more than once` | A sheet's headers changed; update `columns` in the config after checking the change |
 | `unexpected lender statuses` | Decide whether the new status closes a deal; add it to `closed_statuses` or `known_non_closing_statuses` |
@@ -165,4 +183,4 @@ artifact it produced.
 The dashboard is public. It publishes agent names, lender agent names, close dates, statuses, payouts and
 debt amounts per deal, with lead ids (P001…) instead of phones. It never publishes phone numbers, client
 names or emails, and the build fails if a published file contains a phone-number-like value or an email.
-The Google Sheets stay private and are read with a read-only key stored only as a GitHub secret.
+The Google Sheets stay private and are read with a 15-minute read-only token; no Google key exists.
