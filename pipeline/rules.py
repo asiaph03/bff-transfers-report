@@ -41,7 +41,8 @@ def parse_time(v):
         if isinstance(v, float) and np.isnan(v):
             return pd.NaT
         if 1 <= float(v) < 200000:  # spreadsheet serial day number
-            return EXCEL_EPOCH + pd.to_timedelta(float(v), unit="D")
+            # Serial days are floats: 16:33:48 arrives as 16:33:47.99999. Round to the millisecond.
+            return (EXCEL_EPOCH + pd.to_timedelta(float(v), unit="D")).round("ms")
         return pd.NaT
     s = str(v).strip()
     if not s:

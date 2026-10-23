@@ -279,3 +279,9 @@ def test_unexpected_error_still_writes_report(tmp_path, monkeypatch):
     monkeypatch.setattr(build, "run", explode)
     rc = build.main(["--out", str(tmp_path)])
     assert rc == 1 and "FAILED" in (tmp_path / "validation.md").read_text()
+
+
+def test_serial_time_rounds_float_error_to_the_second():
+    # 2026-10-19 16:33:48 as a spreadsheet serial number carries float error just below :48
+    serial = 46314 + (16 * 3600 + 33 * 60 + 48) / 86400 - 1e-11
+    assert rules.parse_time(serial).strftime("%Y-%m-%dT%H:%M:%S") == "2026-10-19T16:33:48"
