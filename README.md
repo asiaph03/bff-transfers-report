@@ -86,7 +86,7 @@ echo "GCP_WIF_PROVIDER = projects/$PROJECT_NUMBER/locations/global/workloadIdent
 ```
 
 Only manually started runs (`workflow_dispatch`) of this one repository can get a token, and the token
-is read-only for Sheets and lasts 15 minutes.
+is read-only for Sheets and lasts at most 1 hour.
 
 ### 2. GitHub repository variables (not secrets; nothing here is a password)
 
@@ -167,7 +167,8 @@ not commit them.
 | Message | Fix |
 |---|---|
 | `GOOGLE_ACCESS_TOKEN is not set` / Google sign-in step failed | Check the two repository variables (setup step 2) and the Workload Identity setup (step 1.4) |
-| `Google Sheets did not answer after 4 attempts` | Google was slow (large, formula-heavy sheets). Wait a few minutes and run the preview again |
+| `Google Sheets did not answer after 5 attempts` or `Google Sheets API error 503` | Google was slow (large, formula-heavy sheets). Wait a few minutes and run the preview again |
+| `Google sign-in expired or was refused (401)` | The run took longer than the 1-hour token, or the Workload Identity setup changed; re-run, then check setup step 1.4 |
 | `permission denied: share the spreadsheet with … as Viewer` | Share that sheet with the service-account email |
 | `missing column(s)` / `used more than once` | A sheet's headers changed; update `columns` in the config after checking the change |
 | `unexpected lender statuses` | Decide whether the new status closes a deal; add it to `closed_statuses` or `known_non_closing_statuses` |
@@ -184,4 +185,4 @@ artifact it produced.
 The dashboard is public. It publishes agent names, lender agent names, close dates, statuses, payouts and
 debt amounts per deal, with lead ids (P001…) instead of phones. It never publishes phone numbers, client
 names or emails, and the build fails if a published file contains a phone-number-like value or an email.
-The Google Sheets stay private and are read with a 15-minute read-only token; no Google key exists.
+The Google Sheets stay private and are read with a read-only token that lasts at most 1 hour; no Google key exists.

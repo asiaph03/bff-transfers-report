@@ -76,7 +76,7 @@ class GoogleSheetsSource:
 
     # Google can take minutes to answer for large, formula-heavy sheets.
     TIMEOUT = (30, 300)          # connect, read (seconds)
-    RETRY_WAITS = (15, 45, 90)   # waits before attempts 2, 3 and 4
+    RETRY_WAITS = (15, 45, 90, 180)   # waits before attempts 2 to 5
 
     def _get(self, url: str, params: dict, where: str = "Google Sheets") -> dict:
         import time
@@ -100,6 +100,8 @@ class GoogleSheetsSource:
             break
         if r is None:
             raise SourceError(f"{where}: Google Sheets did not answer after {1 + len(self.RETRY_WAITS)} attempts")
+        if r.status_code == 401:
+            raise SourceError(f"{where}: Google sign-in expired or was refused (401); the run took longer than the token lifetime or the sign-in failed")
         if r.status_code == 403:
             raise SourceError(f"{where}: permission denied: share the spreadsheet with {self.account} as Viewer")
         if r.status_code == 404:
@@ -108,8 +110,19 @@ class GoogleSheetsSource:
             raise SourceError(f"{where}: Google Sheets API error {r.status_code}")
         return r.json()
 
-    def read(self, spreadsheet_id: str, worksheet: str, columns: list[str]) -> pd.DataFrame:
+    def read(self, spreadsheet_id: str, worksheet: str, columns: list[str], whole_tab: bool = False) -> pd.DataFrame:
         where = f"{worksheet}"
+        if whole_tab:
+            # One request for header and rows: for small tabs on slow spreadsheets.
+            body = self._get(f"{API}/{spreadsheet_id}/values/{_q(worksheet)}",
+                             {"valueRenderOption": "UNFORMATTED_VALUE", "dateTimeRenderOption": "SERIAL_NUMBER"}, where)
+            rows = body.get("values") or [[]]
+            idx = header_index(rows[0], columns, where)
+            data_rows = rows[1:]
+            data = {name: [(r[i] if i < len(r) else None) for r in data_rows] for name, i in idx.items()}
+            df = pd.DataFrame(data)
+            df["_row"] = range(2, len(data_rows) + 2)
+            return df
         head = self._get(f"{API}/{spreadsheet_id}/values/{_q(worksheet)}!1:1", {"valueRenderOption": "UNFORMATTED_VALUE"}, where)
         header = (head.get("values") or [[]])[0]
         idx = header_index(header, columns, where)
@@ -190,7 +203,7 @@ def read_all(cfg: dict, source) -> tuple[dict[str, pd.DataFrame], dict[str, int]
         if isinstance(source, LocalSource):
             tables[key] = source.read_key(key, s["worksheet"], cols)
         else:
-            tables[key] = source.read(s["spreadsheet_id"], s["worksheet"], cols)
+            tables[key] = source.read(s["spreadsheet_id"], s["worksheet"], cols, whole_tab=bool(s.get("read_whole_tab")))
         print(f"  {key}: {len(tables[key])} rows", flush=True)
         ct = s.get("closed_tab")
         if ct and cfg["validation"].get("closed_tab_cross_check"):

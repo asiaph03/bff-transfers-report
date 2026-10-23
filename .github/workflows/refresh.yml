@@ -26,7 +26,7 @@ jobs:
   build:
     name: Test, fetch, calculate and validate
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 55
     permissions:
       contents: read
       id-token: write   # lets this job sign in to Google without a stored key
@@ -56,7 +56,7 @@ jobs:
           service_account: ${{ vars.GCP_SERVICE_ACCOUNT }}
           token_format: access_token
           access_token_scopes: https://www.googleapis.com/auth/spreadsheets.readonly
-          access_token_lifetime: 900s
+          access_token_lifetime: 3600s   # Google can be slow on the RingCX sheet; 1 hour is the maximum
           create_credentials_file: false
 
       - name: Fetch Google Sheets, calculate, validate

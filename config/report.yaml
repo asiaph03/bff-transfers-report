@@ -36,6 +36,7 @@ sources:
       agent: Agent Full Name
       phone: ANI
     min_rows: 500
+    read_whole_tab: true         # small tab on a slow spreadsheet: one request instead of two
   citizen:
     spreadsheet_id: 1URGPKj596-RKXXHTB8o3JoYkaEen-Q2O4EVSTxwvoM8
     worksheet: Affiliate_Clients

@@ -285,3 +285,37 @@ def test_serial_time_rounds_float_error_to_the_second():
     # 2026-10-19 16:33:48 as a spreadsheet serial number carries float error just below :48
     serial = 46314 + (16 * 3600 + 33 * 60 + 48) / 86400 - 1e-11
     assert rules.parse_time(serial).strftime("%Y-%m-%dT%H:%M:%S") == "2026-10-19T16:33:48"
+
+
+class _Resp:
+    def __init__(self, status, body=None):
+        self.status_code, self._body = status, body or {}
+
+    def json(self):
+        return self._body
+
+
+def test_google_source_whole_tab_reads_header_and_rows_in_one_request(monkeypatch):
+    from pipeline import sheets
+
+    src = sheets.GoogleSheetsSource(access_token="test-token")
+    urls = []
+    body = {"values": [["Date", "Other", "ANI"], [46300.5, "x", "5550100001"], [46301.25]]}
+
+    def get(url, params=None, timeout=None):
+        urls.append(url)
+        return _Resp(200, body)
+
+    monkeypatch.setattr(src.session, "get", get)
+    df = src.read("sheet-id", "Two Minute Transfers", ["Date", "ANI"], whole_tab=True)
+    assert len(urls) == 1 and "!" not in urls[0]
+    assert list(df["ANI"]) == ["5550100001", None] and list(df["_row"]) == [2, 3]
+
+
+def test_google_source_401_names_expired_sign_in(monkeypatch):
+    from pipeline import sheets
+
+    src = sheets.GoogleSheetsSource(access_token="test-token")
+    monkeypatch.setattr(src.session, "get", lambda *a, **k: _Resp(401))
+    with pytest.raises(SourceError, match="sign-in expired"):
+        src._get("https://example.invalid", {}, "Two Minute Transfers")
