@@ -907,7 +907,7 @@ def test_shipped_config_keeps_lender_closer_in_preview():
     ca = c["closing_agent"]
     assert ca["source"] is None and ca["lender_mapping"]["name_map"] is None
     assert ca["lender_mapping"]["lender_values_approved"] is False
-    assert ca["lender_mapping"]["fields"] == {"citizen": ["Created By", "Assignees"], "cordoba": ["Assigned To"],
+    assert ca["lender_mapping"]["fields"] == {"citizen": ["Assignees"], "cordoba": ["Assigned To"],
                                               "debtblue": ["Assigned To"]}
     assert "closing_agent" not in c["publish"]["fields"]
     assert not c["sources"]["ringcx"].get("postgres", {}).get("approved_for_dashboard")
@@ -935,7 +935,7 @@ def test_not_enabled_means_every_closed_deal_is_closer_unknown(cfg):
 
 def test_known_closer_from_each_lender_and_difference_from_answering_agent(cfg):
     L = _closed_leads(["citizen", "cordoba", "debtblue", None], agents=["Ben Hall", "Max Fromm", "X", "Y"])
-    T = _tables(citizen=[{"Created By": "BENJAMIN HALL", "Assignees": "benjamin hall"}],
+    T = _tables(citizen=[{"Created By": "JAY MUDRA", "Assignees": "benjamin hall"}],     # Created By is ignored
                 cordoba=[{"_row": 3, "Assigned To": "Ian Rawley"}],
                 debtblue=[{"_row": 4, "Assigned To": "Jay Mudra", "Assigned Company": "Better Future Finance"}])
     out = _assign(cfg, L, T)
@@ -956,7 +956,7 @@ def test_missing_and_blank_ownership_never_fall_back(cfg):
 
 def test_system_accounts_and_lender_staff_are_not_bff(cfg):
     L = _closed_leads(["citizen", "cordoba", "debtblue", "debtblue"])
-    T = _tables(citizen=[{"Created By": "BFF API", "Assignees": "JAY MUDRA"}],
+    T = _tables(citizen=[{"Created By": "JAY MUDRA", "Assignees": "BFF API"}],
                 cordoba=[{"_row": 3, "Assigned To": "Jacob Aparecio"}],
                 debtblue=[{"_row": 4, "Assigned To": "Mayra Vazquez", "Assigned Company": "Debt Blue Servicing"},
                           {"_row": 5, "Assigned To": "Jay Mudra", "Assigned Company": "Council Law Group"}])
@@ -964,17 +964,45 @@ def test_system_accounts_and_lender_staff_are_not_bff(cfg):
     assert list(out["closer_status"]) == ["non_bff"] * 4
     assert set(out["closing_agent"]) == {"Closer unknown"}
     d = rules.closer_diagnostics(out, cfg)
-    assert d["citizen"]["other_field_would_resolve"] == 1 and d["debtblue"]["system_or_non_bff"] == 2
+    assert d["citizen"]["other_field_would_resolve"] == 0 and d["debtblue"]["system_or_non_bff"] == 2
+    assert d["citizen"]["non_bff_values"] == {"BFF API": 1}                         # original value kept for review
 
 
-def test_conflicting_created_by_and_assignee_is_unknown(cfg):
+def test_citizen_uses_the_assigned_field_only(cfg):
+    L = _closed_leads(["citizen", "citizen", "citizen"])
+    T = _tables(citizen=[{"Created By": "BENJAMIN HALL", "Assignees": "JAY MUDRA"},     # disagree: Assignees wins
+                         {"Created By": "JAY MUDRA", "Assignees": ""},                  # blank assignee: no fallback
+                         {"Created By": "BFF API", "Assignees": "Ben Hall"}])           # approved alias only
+    out = _assign(cfg, L, T)
+    assert list(out["closer_status"]) == ["verified", "missing", "verified"]
+    assert list(out["closing_agent"]) == ["Jay Mudra", "Closer unknown", "Benjamin Hall"]
+
+
+def test_no_answering_agent_is_not_counted_as_a_difference(cfg):
+    L = _closed_leads(["cordoba", "cordoba"], agents=["Before RingCX log", "Ian Rawley"])
+    T = _tables(cordoba=[{"Assigned To": "Ian Rawley"}, {"Assigned To": "Ian Rawley"}])
+    c = rules.closer_counts(_assign(cfg, L, T), cfg)
+    assert c["verified"] == 2 and c["verified_differs_from_answering_agent"] == 0 and c["verified_without_answering_agent"] == 1
+    assert rules.lender_closer_columns(cfg)["citizen"] == ["Assignees"]                # Created By is not even read
+
+
+def test_multi_field_conflict_and_partial_rules_still_hold(cfg):
+    c = copy.deepcopy(cfg)
+    c["closing_agent"]["lender_mapping"]["fields"]["citizen"] = ["Created By", "Assignees"]
     L = _closed_leads(["citizen", "citizen"])
     T = _tables(citizen=[{"Created By": "JAY MUDRA", "Assignees": "BENJAMIN HALL"},
                          {"Created By": "JAY MUDRA", "Assignees": ""}])
-    out = _assign(cfg, L, T)
+    out = _assign(c, L, T)
     assert list(out["closer_status"]) == ["conflicting", "partial"]
     assert set(out["closing_agent"]) == {"Closer unknown"}
-    assert rules.closer_diagnostics(out, cfg)["citizen"]["conflicting_fields"] == 1
+
+
+def test_unverified_spelling_is_not_aliased(cfg):
+    L = _closed_leads(["citizen", "cordoba"])
+    T = _tables(citizen=[{"Assignees": "BENJ HALL"}], cordoba=[{"_row": 3, "Assigned To": "Benjamin  Hall."}])
+    out = _assign(cfg, L, T)
+    assert list(out["closer_status"]) == ["unmapped", "unmapped"]
+    assert rules.closer_diagnostics(out, cfg)["citizen"]["unmapped_values"] == {"BENJ HALL": 1}
 
 
 def test_unmapped_names_stay_unknown_and_no_alias_is_implied(cfg):
@@ -996,7 +1024,7 @@ def test_closer_uses_the_matched_lender_record_only(cfg):
 
 
 def test_closer_preview_reads_ownership_columns_only_when_asked(cfg, tmp_path):
-    assert rules.lender_closer_columns(cfg) == {"citizen": ["Created By", "Assignees"], "cordoba": ["Assigned To"],
+    assert rules.lender_closer_columns(cfg) == {"citizen": ["Assignees"], "cordoba": ["Assigned To"],
                                                 "debtblue": ["Assigned To", "Assigned Company"]}
 
 

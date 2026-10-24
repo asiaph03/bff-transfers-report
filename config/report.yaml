@@ -138,8 +138,9 @@ closing_agent:
   unknown_label: Closer unknown
   lender_mapping:                  # PROPOSED for review; build --closer-preview reports it, never publishes it
     lender_values_approved: false  # fields, non-BFF values and the required column below are not approved yet
-    fields:                        # ownership fields read from the matched lender record; all must agree
-      citizen: [Created By, Assignees]   # both hold BFF agent names; they differ on 459 of 1,728 closed records
+    fields:                        # ownership field(s) read from the matched lender record; all must agree
+      citizen: [Assignees]               # owner decision 24 Oct 2026: the assigned-agent field only; Created By is
+                                         # not used. Citizen's sheet labels this field "Assignees" (no "Assigned To").
       cordoba: [Assigned To]             # Created By is "0.0" on 642 of 645 closed records: not usable
       debtblue: [Assigned To]            # mostly DebtBlue / Council Law staff
     require:                       # an extra column that must hold an allowed value for the owner to count as BFF
@@ -149,8 +150,9 @@ closing_agent:
       cordoba: ["0.0", Jacob Aparecio]
       debtblue: [Mayra Vazquez, Olamide Adejumo, Maritza Guzman, Jill Lacy, Roxana Villalta, Osato Iredia, Steve Bellew]
     name_map: null                 # APPROVED lender value -> agent display name; null = none approved
-    # Preview only: lender values that equal (ignoring case) an agent name already used on the dashboard.
-    # Every other value stays unmapped until the owner approves it; no alias is implied.
+    # Preview only: the verified BFF agent names (lender values equal, ignoring case, to an agent name already
+    # used on the dashboard). The approved agent_match alias (Ben Hall -> Benjamin Hall) also applies. Every
+    # other value stays unmapped until the owner approves it; no spelling alias is implied.
     proposed_name_map:
       ARTURO VALENZUELA: Arturo Valenzuela
       AUSTIN BUSH: Austin Bush

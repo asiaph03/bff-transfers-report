@@ -95,7 +95,7 @@ source until `approved_for_dashboard: true`.
 - `agent` is the **answering agent** (the RingCX rule above). It drives the funnel and call metrics for every
   lead, closed or not, and is never replaced by a closer.
 - `closing_agent` is a separate field for closed deals only. Source of truth: the ownership fields of the lender
-  CRM record the deal was matched to (Citizen: Created By + Assignees, which must agree; Cordoba: Assigned To;
+  CRM record the deal was matched to (Citizen: Assignees, its assigned-agent field; Cordoba: Assigned To;
   DebtBlue: Assigned To when Assigned Company is Better Future Finance). RingCX and the SI tab are never used to
   pick a closer. System accounts, lender staff, blanks, conflicts and names without an approved display name
   show "Closer unknown".

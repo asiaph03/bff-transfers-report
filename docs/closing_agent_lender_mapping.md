@@ -1,5 +1,10 @@
 # Closing agent: lender CRM ownership mapping (PROPOSED, preview only)
 
+**Owner decision, 24 Oct 2026: Citizen uses its assigned-agent field only** (labelled "Assignees" in the Citizen
+sheet; there is no "Assigned To" column). Created By is not used and no agreement between the two is required.
+Across all 1,728 closed Citizen records, Assignees gives: verified agent name 1,118, name not yet verified 526,
+blank 65, system account "BFF API" 19. The table below is the earlier field survey.
+
 Owner rule (24 Oct 2026): the lender CRM record is the source of truth for the agent on a closed deal. The RingCX
 answering agent stays a separate funnel metric and is never used to pick a closer. The Sales Input HUB / SI tab
 is diagnostics only (see `closing_agent_si_investigation.md`). Counts below come from the Oct 22 local exports
@@ -9,8 +14,8 @@ is diagnostics only (see `closing_agent_si_investigation.md`). Counts below come
 
 | Lender | Field | Closed records | What it holds | Proposed use |
 |---|---|---|---|---|
-| Citizen | Created By | 1,728 | BFF agent names (upper case); "BFF API" on 168 (system account) | ownership, must agree with Assignees |
-| Citizen | Assignees | 1,728 | BFF agent names; blank on 65; "BFF API" on 19 | ownership, must agree with Created By |
+| Citizen | Created By | 1,728 | BFF agent names (upper case); "BFF API" on 168 (system account) | not used (owner decision) |
+| Citizen | Assignees | 1,728 | BFF agent names; blank on 65; "BFF API" on 19 | ownership (owner decision) |
 | Citizen | Campaign Name | 1,728 | "General" on all | not usable |
 | Cordoba | Assigned To | 645 | BFF agent names (title case); "Jacob Aparecio" on 6 (not a BFF agent name seen elsewhere) | ownership |
 | Cordoba | Created By | 645 | "0.0" on 642, "Jacob Aparecio" on 3 | not usable |
@@ -37,4 +42,5 @@ precedence rules) supplies the fields. All blank -> `missing`; a system/lender-s
 check -> `non_bff`; two fields naming different people -> `conflicting`; one of two fields blank -> `partial`;
 a name without an approved display name -> `unmapped`; otherwise `verified`. Only `verified` shows a name;
 everything else is "Closer unknown". The preview uses `proposed_name_map` (only lender values that equal an agent
-name already on the dashboard, ignoring case); an approved run would use `name_map`, which is null.
+name already on the dashboard, ignoring case, plus the approved alias Ben Hall -> Benjamin Hall); an approved
+run would use `name_map`, which is null. The original lender value is kept in the preview for review.

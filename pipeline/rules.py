@@ -258,17 +258,20 @@ def assign_closers(leads: pd.DataFrame, tables: dict | None, cfg: dict, use_lend
                    name_map: dict | None = None) -> pd.DataFrame:
     """Add closing_agent and closer_status from the matched lender record (match_closes' close_row).
 
-    For a closed lead, the configured ownership fields of its matched lender record are read as written:
+    For a closed lead, the configured ownership field(s) of its matched lender record are read as written:
       all blank -> "missing"; any value is a listed system / lender-staff value, or the lender's required column
       (e.g. DebtBlue Assigned Company) does not hold an allowed value -> "non_bff"; two fields name different
-      people -> "conflicting"; one field named and another blank (two-field lenders) -> "partial";
-      the name is absent from `name_map` -> "unmapped"; otherwise "verified" with the mapped display name.
-    Leads that did not close: "not_closed". No source in use: "no_source". RingCX is never consulted.
+      people -> "conflicting"; one field named and another blank (multi-field lenders) -> "partial";
+      the name is not a verified agent name in `name_map` (after the approved agent_match aliases only)
+      -> "unmapped"; otherwise "verified" with the mapped display name.
+    `_closer_value` keeps the original value(s) for review. Leads that did not close: "not_closed". No source
+    in use: "no_source". RingCX is never consulted.
     """
     ca = cfg["closing_agent"]
     lm = ca["lender_mapping"]
     unknown = ca["unknown_label"]
     nm = {_fold(k): v for k, v in (name_map or {}).items()}
+    aliases = {_fold(k): _fold(v) for k, v in (cfg.get("agent_match", {}).get("aliases") or {}).items()}
     non_bff = {k: {_fold(v) for v in vals} for k, vals in (lm.get("non_bff_values") or {}).items()}
     require = lm.get("require") or {}
     index = {}
@@ -291,25 +294,26 @@ def assign_closers(leads: pd.DataFrame, tables: dict | None, cfg: dict, use_lend
             fields = lm["fields"][k]
             raw = [_blank(rec[f]) if f in rec.index else "" for f in fields]
             named = [v for v in raw if v]
+            shown = " | ".join(named)
             staff = [v for v in named if _fold(v) in non_bff.get(k, set())]
             bff = [v for v in named if _fold(v) not in non_bff.get(k, set())]
             req = require.get(k)
             req_ok = req is None or _fold(_blank(rec.get(req["column"], ""))) in {_fold(x) for x in req["values"]}
-            distinct = sorted({_fold(v) for v in bff})
-            # would the other field settle it if a system/staff or blank value were ignored? (decision aid only)
-            other = len(distinct) == 1 and req_ok and (bool(staff) or len(named) < len(fields))
+            distinct = sorted({aliases.get(_fold(v), _fold(v)) for v in bff})
+            # would another field settle it if a system/staff or blank value were ignored? (decision aid only)
+            other = len(fields) > 1 and len(distinct) == 1 and req_ok and (bool(staff) or len(named) < len(fields))
             if not named:
                 vals = (unknown, "missing", "", False)
             elif staff or not req_ok:
-                vals = (unknown, "non_bff", "", other)
+                vals = (unknown, "non_bff", shown, other)
             elif len(distinct) > 1:
-                vals = (unknown, "conflicting", "", False)
+                vals = (unknown, "conflicting", shown, False)
             elif len(named) < len(fields):
-                vals = (unknown, "partial", bff[0], other)
+                vals = (unknown, "partial", shown, other)
             elif distinct[0] not in nm:
-                vals = (unknown, "unmapped", bff[0], False)
+                vals = (unknown, "unmapped", shown, False)
             else:
-                vals = (nm[distinct[0]], "verified", bff[0], False)
+                vals = (nm[distinct[0]], "verified", shown, False)
         for key, v in zip(cols, vals):
             cols[key].append(v)
     for k, v in cols.items():
@@ -323,8 +327,14 @@ def closer_counts(leads: pd.DataFrame, cfg: dict | None = None) -> dict:
     counts = {s: int((closed["closer_status"] == s).sum()) for s in CLOSER_STATUSES if s != "not_closed"}
     aliases = {_fold(k): _fold(v) for k, v in ((cfg or {}).get("agent_match", {}).get("aliases") or {}).items()}
     canon = lambda v: aliases.get(_fold(v), _fold(v))  # noqa: E731 - approved answering-agent aliases only
+    am = (cfg or {}).get("agent_match", {})
+    # answering-agent placeholders (paid before the RingCX log, no accepted call): there is no agent to compare
+    labels = {_fold(x) for x in (am.get("label_before_log"), am.get("label_not_answered")) if x}
     v = closed[closed["closer_status"] == "verified"]
-    counts["verified_differs_from_answering_agent"] = int(sum(canon(a) != canon(b) for a, b in zip(v["closing_agent"], v["agent"])))
+    has_answer = [canon(b) not in labels and bool(_blank(b)) for b in v["agent"]]
+    counts["verified_differs_from_answering_agent"] = int(sum(h and canon(a) != canon(b)
+                                                              for a, b, h in zip(v["closing_agent"], v["agent"], has_answer)))
+    counts["verified_without_answering_agent"] = int(len(v) - sum(has_answer))
     return counts
 
 
@@ -346,9 +356,12 @@ def closer_diagnostics(leads: pd.DataFrame, cfg: dict) -> dict:
             "unmapped_name": int((st == "unmapped").sum()),
             "verified": int((st == "verified").sum()),
             "verified_differs_from_answering_agent": c["verified_differs_from_answering_agent"],
-            "verified_same_as_answering_agent": c["verified"] - c["verified_differs_from_answering_agent"],
+            "verified_same_as_answering_agent": c["verified"] - c["verified_differs_from_answering_agent"] - c["verified_without_answering_agent"],
+            "verified_without_answering_agent": c["verified_without_answering_agent"],
             "other_field_would_resolve": int(g["_closer_other_resolves"].map(lambda x: x is True).sum()),
             "unmapped_values": {n: int(x) for n, x in g.loc[st == "unmapped", "_closer_value"].value_counts().sort_index().items()},
+            "non_bff_values": {n: int(x) for n, x in g.loc[st == "non_bff", "_closer_value"].value_counts().sort_index().items()},
+            "verified_values": {n: int(x) for n, x in g.loc[st == "verified", "_closer_value"].value_counts().sort_index().items()},
         }
     return out
 
