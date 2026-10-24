@@ -6,7 +6,8 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
-export const html = readFileSync(path.join(here, '..', 'site', 'index.html'), 'utf8');
+// A Windows checkout (core.autocrlf=true) has CRLF line endings; the tests match multi-line text, so read the page with LF.
+export const html = readFileSync(path.join(here, '..', 'site', 'index.html'), 'utf8').replace(/\r\n/g, '\n');
 export const block = (name) => {
   const a = `/* BFF-${name}:BEGIN */`, b = `/* BFF-${name}:END */`;
   const i = html.indexOf(a), j = html.indexOf(b);
