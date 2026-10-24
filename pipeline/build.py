@@ -90,7 +90,10 @@ def run(args) -> int:
             facts["ringcx source"] = f"PostgreSQL {rcx['postgres']['table']} (read-only)"
         source = LocalSource(json.loads(Path(args.local_files).read_text())) if args.local_files else GoogleSheetsSource()
         facts["source"] = "local exported copies (development)" if args.local_files else "Google Sheets (read-only)"
-        tables, closed_tab_rows = read_all(cfg, source, pg_source)
+        ca = cfg.get("closing_agent")
+        closer_on = bool(ca) and (ca["source"] == "lender" or args.closer_preview)
+        extra = rules.lender_closer_columns(cfg) if closer_on else None
+        tables, closed_tab_rows = read_all(cfg, source, pg_source, extra_columns=extra)
         if pg_source is not None:
             facts.update({f"ringcx db {k.replace('_', ' ')}": v for k, v in pg_source.diag.items()})
     except SourceError as e:
@@ -124,20 +127,16 @@ def run(args) -> int:
     leads, excluded = rules.match_closes(leads, crm, cfg)
     ca = cfg.get("closing_agent")
     if ca:
-        use = ca["source"] == "candidate" or args.closer_preview
-        ledger = None
-        if use:
-            try:
-                ledger = rules.prepare_closer_ledger(read_closer_ledger(cfg, source), ca["candidate"], cfg)
-            except SourceError as e:
-                rep.check(False, "closing-agent ledger readable", str(e))
-                return finish(rep, facts, out, None)
-        leads = rules.assign_closers(leads, ledger, cfg, use_candidate=use, as_of=dt.date.today())
-        counts = rules.closer_counts(leads)
-        label = "approved source" if ca["source"] == "candidate" else ("candidate, preview only" if use else "no approved source")
+        use = ca["source"] == "lender" or args.closer_preview
+        lm = ca["lender_mapping"]
+        # Approved runs use only the approved name map; a preview shows the proposed map, clearly labelled.
+        nmap = lm["name_map"] if ca["source"] == "lender" else lm.get("proposed_name_map")
+        leads = rules.assign_closers(leads, tables if use else None, cfg, use_lender=use, name_map=nmap)
+        counts = rules.closer_counts(leads, cfg)
+        label = "approved lender mapping" if ca["source"] == "lender" else ("lender fields, PROPOSED mapping, preview only" if use else "not enabled")
         facts[f"closing agent ({label})"] = ", ".join(f"{k.replace('_', ' ')} {v}" for k, v in counts.items())
         unknown = {k: v for k, v in counts.items() if k not in ("verified", "verified_differs_from_answering_agent") and v}
-        if ca["source"] == "candidate" and unknown:
+        if ca["source"] == "lender" and unknown:
             rep.warn("closing agent unknown for " + ", ".join(f"{v} {k.replace('_', ' ')}" for k, v in unknown.items())
                      + " closed deal(s)")
     validate.check_business(rep, leads, ringcx, excluded, cfg)
@@ -149,7 +148,7 @@ def run(args) -> int:
 
     rows = rules.to_public_rows(leads, cfg)
     if args.closer_preview and "closing_agent" in leads:
-        write_closer_preview(out / "closing_agent_preview.md", leads, ledger, cfg)
+        write_closer_preview(out / "closing_agent_preview.md", leads, cfg)
     totals = rules.summarize(rows)
     validate.check_output(rep, rows, totals, cfg)
     baseline = fetch_baseline(cfg["publish"]["site_url"])
@@ -193,39 +192,25 @@ def run(args) -> int:
     return finish(rep, facts, out, site)
 
 
-def read_closer_ledger(cfg: dict, source):
-    """Read the candidate closer ledger (read-only, same sign-in as the other sheets)."""
-    cand = cfg["closing_agent"]["candidate"]
-    cols = list(cand["columns"].values())
-    print(f"reading closing-agent candidate / {cand['worksheet']} ({len(cols)} columns)", flush=True)
-    if isinstance(source, LocalSource):
-        return source.read_key(cand["spreadsheet_key"], cand["worksheet"], cols)
-    if hasattr(source, "start_source"):
-        source.start_source()
-    return source.read(cfg["sources"][cand["spreadsheet_key"]]["spreadsheet_id"], cand["worksheet"], cols)
-
-
-def write_closer_preview(path: Path, leads, ledger, cfg: dict) -> None:
-    """Preview-only review file with aggregate counts and closer names; no phones, client data or per-deal rows.
+def write_closer_preview(path: Path, leads, cfg: dict) -> None:
+    """Preview-only review file: per-lender aggregate counts and agent-name values; no phones or deal rows.
     Written beside validation.md, outside site/, so it is never published."""
-    cand = cfg["closing_agent"]["candidate"]
+    lm = cfg["closing_agent"]["lender_mapping"]
     d = rules.closer_diagnostics(leads, cfg)
+    total = rules.closer_counts(leads, cfg)
     lines = ["# Closing-agent preview (diagnostic only, not published)", "",
-             f"Candidate: {cand['name']} ({cand['worksheet']}). Not an approved source. "
-             f"Lender values approved: {cand['lender_values_approved']}. Name map approved: {cand.get('name_map') is not None}.", "",
-             f"Closed deals: {d['closed_deals']}", "", "## Closer status", ""]
-    lines += [f"- {k.replace('_', ' ')}: {v}" for k, v in d["status"].items()]
-    lines += ["", "## Match quality", ""]
-    for k in ("phone_match_any_lender", "exact_phone_and_lender_single_row", "multiple_rows_for_one_deal",
-              "multiple_rows_same_closer", "missing_closer", "agent_vs_cln_agent_differs", "unmapped_closer_name",
-              "future_or_invalid_date", "ledger_date_before_paid_call", "verified_differs_from_answering_agent"):
-        lines.append(f"- {k.replace('_', ' ')}: {d[k]}")
-    for title, key in (("By lender / status", "by_lender"), ("Ledger lender values used by matches", "lender_values_used"),
-                       ("Closer names on matched deals (status)", "closer_names")):
-        lines += ["", f"## {title}", ""] + [f"- {k}: {v}" for k, v in d[key].items()]
-    if ledger is not None:
-        lines += ["", "## Unresolved closer names in the whole ledger (rows)", ""]
-        lines += [f"- {k}: {v}" for k, v in rules.ledger_name_counts(ledger, cand.get("name_map")).items()]
+             "Source: the matched lender CRM record's ownership fields. RingCX and the SI tab are not used.",
+             f"Lender mapping approved: {lm['lender_values_approved']}. Name map: "
+             + ("approved" if cfg["closing_agent"]["source"] == "lender" else "PROPOSED (exact-name matches only)"), "",
+             "Fields: " + "; ".join(f"{k}: {' + '.join(v)}" for k, v in lm["fields"].items()), "",
+             "## All lenders", ""] + [f"- {k.replace('_', ' ')}: {v}" for k, v in total.items()]
+    for k, v in d.items():
+        lines += ["", f"## {cfg['lenders']['display_names'].get(k, k)}", ""]
+        for name, n in v.items():
+            if name != "unmapped_values":
+                lines.append(f"- {name.replace('_', ' ')}: {n}")
+        if v["unmapped_values"]:
+            lines.append("- unmapped values: " + ", ".join(f"{n} ({x})" for n, x in v["unmapped_values"].items()))
     text = "\n".join(lines) + "\n"
     assert_no_secret(text, path.name)
     path.write_text(text, encoding="utf-8")
@@ -251,7 +236,7 @@ def main(argv=None) -> int:
     ap.add_argument("--ringcx-backend", choices=("config", "postgres"), default="config",
                     help="postgres: read RingCX from the database and compare it with the sheet (preview only)")
     ap.add_argument("--closer-preview", action="store_true",
-                    help="also read the candidate closing-agent ledger and write aggregate counts to out/closing_agent_preview.md (never published)")
+                    help="also read the lender ownership fields and write per-lender closing-agent counts to out/closing_agent_preview.md (never published)")
     ap.add_argument("--check-config", action="store_true")
     args = ap.parse_args(argv)
     if args.check_config:

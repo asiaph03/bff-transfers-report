@@ -221,6 +221,7 @@ def match_closes(leads: pd.DataFrame, crm: pd.DataFrame, cfg: dict) -> tuple[pd.
     out["close_date"] = pd.to_datetime(pick["close_date"]).values
     out["debt_enrolled"] = pd.to_numeric(pick["debt"], errors="coerce").values
     out["lender_agent"] = pick["agent"].values
+    out["close_row"] = pick["_row"].values          # the matched lender record (its sheet row), for closer lookup
     out["active"] = pick["is_active"].fillna(False).astype(bool).values
     excluded = m[m["is_closed"] & ~m["on_or_after"]]
     return out, excluded
@@ -228,131 +229,128 @@ def match_closes(leads: pd.DataFrame, crm: pd.DataFrame, cfg: dict) -> tuple[pd.
 
 # ---------- closing agent (separate from the answering agent) ----------
 
-# Closed-deal closer statuses, most fundamental first. Only "verified" carries a name; every other closed deal
-# shows the unknown label. Nothing here falls back to the answering agent.
-CLOSER_STATUSES = ("not_closed", "no_source", "no_phone_match", "lender_mismatch", "ambiguous", "invalid_date",
-                   "missing", "conflicting", "unmapped", "verified")
+# Closed-deal closer statuses. Only "verified" carries a name; every other closed deal shows the unknown label.
+# The closer comes only from the matched lender record's ownership fields, never from RingCX.
+CLOSER_STATUSES = ("not_closed", "no_source", "missing", "non_bff", "conflicting", "partial", "unmapped", "verified")
 
 
-def prepare_closer_ledger(df: pd.DataFrame, cand: dict, cfg: dict) -> pd.DataFrame:
-    """Ledger rows as phone / agent / raw_agent / lender text and a parsed date; phones use the dashboard's
-    normalization. Values are read as they are: nothing is corrected or reinterpreted."""
-    c, p = cand["columns"], cfg["phone"]
-    return pd.DataFrame({
-        "phone": df[c["phone"]].map(lambda v: norm_phone(v, p["digits"], p["min_digits"])).values,
-        "agent": df[c["agent"]].map(clean_text).values,
-        "raw_agent": df[c["raw_agent"]].map(clean_text).values,
-        "lender": df[c["lender"]].map(clean_text).values,
-        "date": pd.to_datetime(df[c["date"]].map(parse_time), errors="coerce").values,
-    })
+def _fold(v: str) -> str:
+    return " ".join(str(v).split()).casefold()
 
 
-def assign_closers(leads: pd.DataFrame, ledger: pd.DataFrame | None, cfg: dict, use_candidate: bool,
-                   as_of: dt.date | None = None) -> pd.DataFrame:
-    """Add closing_agent and closer_status (plus _si_* diagnostics used only for aggregate counts).
+def _blank(v) -> str:
+    """Ownership text as written; blank, NaN-like and None values are blank."""
+    t = clean_text(v)
+    return "" if t.casefold() in ("nan", "none") else t
 
-    Conservative matching for a closed lead, in order:
-      no ledger in use -> "no_source"; no ledger row with the lead's normalized phone -> "no_phone_match";
-      phone rows exist but none whose lender value is listed for the closing lender -> "lender_mismatch";
-      more than one phone+lender row -> "ambiguous" (no row is chosen, even when they agree);
-      the single row's date is blank, unreadable or after `as_of` -> "invalid_date";
-      blank closer -> "missing"; raw agent differs from the cleaned agent -> "conflicting";
-      closer absent from the approved name map -> "unmapped"; otherwise "verified" with the mapped name.
-    Leads that did not close get no closer ("not_closed"). The answering agent is never used.
+
+def lender_closer_columns(cfg: dict) -> dict[str, list[str]]:
+    """Extra lender columns the closer needs (ownership fields and any required column), per lender."""
+    lm = cfg["closing_agent"]["lender_mapping"]
+    out = {}
+    for k, fields in lm["fields"].items():
+        req = (lm.get("require") or {}).get(k)
+        out[k] = list(dict.fromkeys(list(fields) + ([req["column"]] if req else [])))
+    return out
+
+
+def assign_closers(leads: pd.DataFrame, tables: dict | None, cfg: dict, use_lender: bool,
+                   name_map: dict | None = None) -> pd.DataFrame:
+    """Add closing_agent and closer_status from the matched lender record (match_closes' close_row).
+
+    For a closed lead, the configured ownership fields of its matched lender record are read as written:
+      all blank -> "missing"; any value is a listed system / lender-staff value, or the lender's required column
+      (e.g. DebtBlue Assigned Company) does not hold an allowed value -> "non_bff"; two fields name different
+      people -> "conflicting"; one field named and another blank (two-field lenders) -> "partial";
+      the name is absent from `name_map` -> "unmapped"; otherwise "verified" with the mapped display name.
+    Leads that did not close: "not_closed". No source in use: "no_source". RingCX is never consulted.
     """
     ca = cfg["closing_agent"]
+    lm = ca["lender_mapping"]
     unknown = ca["unknown_label"]
-    cand = ca["candidate"]
-    name_map = {k.strip().upper(): v for k, v in (cand.get("name_map") or {}).items()}
-    as_of = pd.Timestamp(as_of or dt.date.today())
+    nm = {_fold(k): v for k, v in (name_map or {}).items()}
+    non_bff = {k: {_fold(v) for v in vals} for k, vals in (lm.get("non_bff_values") or {}).items()}
+    require = lm.get("require") or {}
+    index = {}
+    if use_lender and tables:
+        for k in lm["fields"]:
+            if k in tables:
+                index[k] = tables[k].set_index("_row")
     out = leads.copy()
-    cols = {k: [] for k in ("closing_agent", "closer_status", "_si_phone_rows", "_si_lender_rows", "_si_lender_values",
-                            "_si_rows_agree", "_si_closer", "_si_date_before_paid")}
-    by_phone = ledger.groupby("phone") if ledger is not None and len(ledger) else None
-
-    def put(agent, status, phone_rows=0, lender_rows=0, values="", agree=None, closer="", before=None):
-        for k, v in zip(cols, (agent, status, phone_rows, lender_rows, values, agree, closer, before)):
-            cols[k].append(v)
-
+    cols = {k: [] for k in ("closing_agent", "closer_status", "_closer_value", "_closer_other_resolves")}
     for r in out.itertuples(index=False):
         if not bool(r.closed):
-            put(None, "not_closed"); continue
-        if not use_candidate or by_phone is None:
-            put(unknown, "no_source"); continue
-        rows = by_phone.get_group(r.phone) if r.phone and r.phone in by_phone.groups else ledger.iloc[0:0]
-        if rows.empty:
-            put(unknown, "no_phone_match"); continue
-        same = rows[rows["lender"].isin(cand["lender_values"].get(r.close_lender_key, []))]
-        values = "|".join(sorted(set(same["lender"])))
-        if same.empty:
-            put(unknown, "lender_mismatch", len(rows)); continue
-        if len(same) > 1:
-            agree = len({a.upper() for a in same["agent"]}) == 1 and bool(same["agent"].iloc[0])
-            put(unknown, "ambiguous", len(rows), len(same), values, agree); continue
-        one = same.iloc[0]
-        d = one["date"]
-        paid = pd.Timestamp(r.call_time).normalize() if pd.notna(r.call_time) else pd.NaT
-        before = bool(pd.notna(d) and pd.notna(paid) and d.normalize() < paid)
-        args = (len(rows), 1, values, True, one["agent"], before)
-        if pd.isna(d) or d.normalize() > as_of.normalize():
-            put(unknown, "invalid_date", *args)
-        elif not one["agent"]:
-            put(unknown, "missing", *args)
-        elif one["raw_agent"] and one["raw_agent"] != one["agent"]:
-            put(unknown, "conflicting", *args)
-        elif one["agent"].upper() not in name_map:
-            put(unknown, "unmapped", *args)
+            vals = (None, "not_closed", "", False)
+        elif not use_lender or r.close_lender_key not in index:
+            vals = (unknown, "no_source", "", False)
         else:
-            put(name_map[one["agent"].upper()], "verified", *args)
+            k = r.close_lender_key
+            rec = index[k].loc[r.close_row]
+            if isinstance(rec, pd.DataFrame):          # duplicate row keys never happen; refuse rather than guess
+                rec = rec.iloc[0:0]
+            fields = lm["fields"][k]
+            raw = [_blank(rec[f]) if f in rec.index else "" for f in fields]
+            named = [v for v in raw if v]
+            staff = [v for v in named if _fold(v) in non_bff.get(k, set())]
+            bff = [v for v in named if _fold(v) not in non_bff.get(k, set())]
+            req = require.get(k)
+            req_ok = req is None or _fold(_blank(rec.get(req["column"], ""))) in {_fold(x) for x in req["values"]}
+            distinct = sorted({_fold(v) for v in bff})
+            # would the other field settle it if a system/staff or blank value were ignored? (decision aid only)
+            other = len(distinct) == 1 and req_ok and (bool(staff) or len(named) < len(fields))
+            if not named:
+                vals = (unknown, "missing", "", False)
+            elif staff or not req_ok:
+                vals = (unknown, "non_bff", "", other)
+            elif len(distinct) > 1:
+                vals = (unknown, "conflicting", "", False)
+            elif len(named) < len(fields):
+                vals = (unknown, "partial", bff[0], other)
+            elif distinct[0] not in nm:
+                vals = (unknown, "unmapped", bff[0], False)
+            else:
+                vals = (nm[distinct[0]], "verified", bff[0], False)
+        for key, v in zip(cols, vals):
+            cols[key].append(v)
     for k, v in cols.items():
         out[k] = v
     return out
 
 
-def closer_counts(leads: pd.DataFrame) -> dict:
+def closer_counts(leads: pd.DataFrame, cfg: dict | None = None) -> dict:
     """Aggregate closer-quality counts for closed leads (counts only, no records)."""
     closed = leads[leads["closed"]]
     counts = {s: int((closed["closer_status"] == s).sum()) for s in CLOSER_STATUSES if s != "not_closed"}
+    aliases = {_fold(k): _fold(v) for k, v in ((cfg or {}).get("agent_match", {}).get("aliases") or {}).items()}
+    canon = lambda v: aliases.get(_fold(v), _fold(v))  # noqa: E731 - approved answering-agent aliases only
     v = closed[closed["closer_status"] == "verified"]
-    counts["verified_differs_from_answering_agent"] = int((v["closing_agent"].str.upper() != v["agent"].str.upper()).sum())
+    counts["verified_differs_from_answering_agent"] = int(sum(canon(a) != canon(b) for a, b in zip(v["closing_agent"], v["agent"])))
     return counts
 
 
 def closer_diagnostics(leads: pd.DataFrame, cfg: dict) -> dict:
-    """Aggregate review figures for the closer preview: counts per status, match shape and closer names."""
+    """Per-lender aggregate review figures (counts and agent-name values only)."""
     closed = leads[leads["closed"]]
-    st = closed["closer_status"]
-    single = closed[closed["_si_lender_rows"] == 1]
-    multi = closed[closed["_si_lender_rows"] > 1]
-    names = (closed.loc[closed["_si_closer"] != "", ["_si_closer", "closer_status"]]
-             .groupby(["_si_closer", "closer_status"]).size().sort_index())
-    by_lender = closed.groupby(["close_lender_key", "closer_status"]).size().sort_index()
-    values = closed.loc[closed["_si_lender_values"] != ""].groupby(["close_lender_key", "_si_lender_values"]).size()
-    return {
-        "closed_deals": int(len(closed)),
-        "status": {s: int((st == s).sum()) for s in CLOSER_STATUSES if s != "not_closed"},
-        "phone_match_any_lender": int((closed["_si_phone_rows"] > 0).sum()),
-        "exact_phone_and_lender_single_row": int(len(single)),
-        "multiple_rows_for_one_deal": int(len(multi)),
-        "multiple_rows_same_closer": int(multi["_si_rows_agree"].map(lambda x: x is True).sum()),
-        "missing_closer": int((st == "missing").sum()),
-        "agent_vs_cln_agent_differs": int((st == "conflicting").sum()),
-        "unmapped_closer_name": int((st == "unmapped").sum()),
-        "future_or_invalid_date": int((st == "invalid_date").sum()),
-        "ledger_date_before_paid_call": int(single["_si_date_before_paid"].map(lambda x: x is True).sum()),
-        "verified_differs_from_answering_agent": closer_counts(leads)["verified_differs_from_answering_agent"],
-        "by_lender": {f"{k[0]}/{k[1]}": int(n) for k, n in by_lender.items()},
-        "lender_values_used": {f"{k[0]}/{k[1]}": int(n) for k, n in values.items()},
-        "closer_names": {f"{k[0]} ({k[1]})": int(n) for k, n in names.items()},
-    }
-
-
-def ledger_name_counts(ledger: pd.DataFrame, name_map: dict | None) -> dict:
-    """Closer names in the whole ledger that have no approved full name, with row counts (names only)."""
-    approved = {k.strip().upper() for k in (name_map or {})}
-    s = ledger.loc[ledger["agent"] != "", "agent"]
-    s = s[~s.str.upper().isin(approved)]
-    return {k: int(v) for k, v in s.value_counts().sort_index().items()}
+    out = {}
+    for k in cfg["lenders"]["order"]:
+        g = closed[closed["close_lender_key"] == k]
+        st = g["closer_status"]
+        c = closer_counts(g, cfg)
+        out[k] = {
+            "closed_deals": int(len(g)),
+            "usable_ownership_value": int(st.isin(["unmapped", "verified"]).sum()),
+            "missing": int((st == "missing").sum()),
+            "system_or_non_bff": int((st == "non_bff").sum()),
+            "conflicting_fields": int((st == "conflicting").sum()),
+            "one_field_blank": int((st == "partial").sum()),
+            "unmapped_name": int((st == "unmapped").sum()),
+            "verified": int((st == "verified").sum()),
+            "verified_differs_from_answering_agent": c["verified_differs_from_answering_agent"],
+            "verified_same_as_answering_agent": c["verified"] - c["verified_differs_from_answering_agent"],
+            "other_field_would_resolve": int(g["_closer_other_resolves"].map(lambda x: x is True).sum()),
+            "unmapped_values": {n: int(x) for n, x in g.loc[st == "unmapped", "_closer_value"].value_counts().sort_index().items()},
+        }
+    return out
 
 
 # ---------- output rows ----------

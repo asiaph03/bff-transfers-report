@@ -94,19 +94,17 @@ source until `approved_for_dashboard: true`.
 
 - `agent` is the **answering agent** (the RingCX rule above). It drives the funnel and call metrics for every
   lead, closed or not, and is never replaced by a closer.
-- `closing_agent` is a separate field for closed deals only: the closer from an approved source, or
-  "Closer unknown". It never falls back to the answering agent, and lender CRM fields (Created By, Assignees,
-  Assigned To) are not used: they record lender staff or current assignment, not the BFF closer.
-- No closer source is approved yet (`closing_agent.source: null`), so every closed deal is "Closer unknown" and
-  `closing_agent` is not published. The candidate is the SI tab of the Citizen workbook, an `IMPORTRANGE` of the
-  "Sales Input HUB V2" sheet (see `docs/closing_agent_si_investigation.md`). `--closer-preview` reads it for
-  review only and writes aggregate counts and closer names to `out/closing_agent_preview.md` (outside `site/`,
-  never published; no phones or deal rows). Each closed deal gets one status: `no_phone_match`,
-  `lender_mismatch`, `ambiguous` (several matching rows; none is chosen), `invalid_date` (blank, unreadable or
-  future ledger date), `missing`, `conflicting` (Agent differs from Cln Agent), `unmapped` (no approved full
-  name) or `verified`.
-- Using it on the dashboard needs: the source confirmed as authoritative, approved lender values
-  (`lender_values_approved: true`), an approved `name_map`, `source: candidate`, and `closing_agent` added to `publish.fields` (the config check enforces this order).
+- `closing_agent` is a separate field for closed deals only. Source of truth: the ownership fields of the lender
+  CRM record the deal was matched to (Citizen: Created By + Assignees, which must agree; Cordoba: Assigned To;
+  DebtBlue: Assigned To when Assigned Company is Better Future Finance). RingCX and the SI tab are never used to
+  pick a closer. System accounts, lender staff, blanks, conflicts and names without an approved display name
+  show "Closer unknown".
+- Not enabled yet (`closing_agent.source: null`, `lender_values_approved: false`, `name_map: null`), so every
+  closed deal is "Closer unknown" and `closing_agent` is not published. `--closer-preview` reads the ownership
+  fields and writes per-lender counts to `out/closing_agent_preview.md` (outside `site/`, never published; no
+  phones or deal rows), using the proposed name map. Details: `docs/closing_agent_lender_mapping.md`.
+- Enabling it needs: approved fields and non-BFF values (`lender_values_approved: true`), an approved
+  `name_map`, `source: lender`, and `closing_agent` added to `publish.fields` (the config check enforces this).
 
 ## One-time setup
 

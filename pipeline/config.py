@@ -66,27 +66,28 @@ def validate_config(cfg: dict) -> list[str]:
     if ca is not None:
         _need(isinstance(ca, dict), "closing_agent must be a mapping", e)
         ca = ca if isinstance(ca, dict) else {}
-        _need(ca.get("source") in (None, "candidate"), "closing_agent.source must be null or candidate", e)
+        _need(ca.get("source") in (None, "lender"), "closing_agent.source must be null or lender", e)
         _need(isinstance(ca.get("unknown_label"), str) and ca.get("unknown_label"), "closing_agent.unknown_label is missing", e)
-        cand = ca.get("candidate") or {}
-        _need(cand.get("spreadsheet_key") in SOURCE_KEYS, "closing_agent.candidate.spreadsheet_key must name a source", e)
-        _need(isinstance(cand.get("worksheet"), str) and cand.get("worksheet"), "closing_agent.candidate.worksheet is missing", e)
-        ccols = cand.get("columns") or {}
-        for c in ("phone", "agent", "raw_agent", "lender", "date"):
-            _need(isinstance(ccols.get(c), str) and ccols.get(c), f"closing_agent.candidate.columns.{c} is missing", e)
-        lv = cand.get("lender_values") or {}
-        _need(set(lv) == set(LENDER_KEYS) and all(isinstance(v, list) and v for v in lv.values()),
-              "closing_agent.candidate.lender_values must list values for citizen, cordoba and debtblue", e)
-        _need(isinstance(cand.get("lender_values_approved"), bool),
-              "closing_agent.candidate.lender_values_approved must be true or false", e)
-        _need(ca.get("source") is None or cand.get("lender_values_approved") is True,
-              "closing_agent.source: candidate needs approved lender_values", e)
-        nm = cand.get("name_map")
-        _need(nm is None or (isinstance(nm, dict) and all(isinstance(k, str) and isinstance(v, str) for k, v in nm.items())),
-              "closing_agent.candidate.name_map must be null or a mapping of names", e)
-        _need(ca.get("source") is None or isinstance(nm, dict),
-              "closing_agent.source: candidate needs an approved name_map", e)
-        _need("closing_agent" not in cfg.get("publish", {}).get("fields", []) or ca.get("source") == "candidate",
+        lm = ca.get("lender_mapping") or {}
+        _need(isinstance(lm.get("lender_values_approved"), bool),
+              "closing_agent.lender_mapping.lender_values_approved must be true or false", e)
+        f = lm.get("fields") or {}
+        _need(set(f) == set(LENDER_KEYS) and all(isinstance(v, list) and v and all(isinstance(x, str) and x for x in v)
+                                                 for v in f.values()),
+              "closing_agent.lender_mapping.fields must list ownership columns for citizen, cordoba and debtblue", e)
+        for k, r in (lm.get("require") or {}).items():
+            _need(k in LENDER_KEYS and isinstance(r, dict) and isinstance(r.get("column"), str) and isinstance(r.get("values"), list),
+                  f"closing_agent.lender_mapping.require.{k} needs column and values", e)
+        nb = lm.get("non_bff_values") or {}
+        _need(isinstance(nb, dict) and all(k in LENDER_KEYS and isinstance(v, list) for k, v in nb.items()),
+              "closing_agent.lender_mapping.non_bff_values must list values per lender", e)
+        for key in ("name_map", "proposed_name_map"):
+            nm = lm.get(key)
+            _need(nm is None or (isinstance(nm, dict) and all(isinstance(k, str) and isinstance(v, str) for k, v in nm.items())),
+                  f"closing_agent.lender_mapping.{key} must be null or a mapping of names", e)
+        _need(ca.get("source") is None or (lm.get("lender_values_approved") is True and isinstance(lm.get("name_map"), dict)),
+              "closing_agent.source: lender needs approved lender_values and an approved name_map", e)
+        _need("closing_agent" not in cfg.get("publish", {}).get("fields", []) or ca.get("source") == "lender",
               "publish.fields may include closing_agent only once a closer source is approved", e)
 
     pl = cfg.get("paid_leads", {})

@@ -267,8 +267,11 @@ class LocalSource:
         return sum(1 for r in rows if any(v not in (None, "") for v in list(r)[:5]))
 
 
-def read_all(cfg: dict, source, pg_source=None) -> tuple[dict[str, pd.DataFrame], dict[str, int]]:
+def read_all(cfg: dict, source, pg_source=None, extra_columns: dict | None = None) -> tuple[dict[str, pd.DataFrame], dict[str, int]]:
     """Read every configured worksheet and each lender's Closed tab row count.
+
+    `extra_columns` ({source key: [column, ...]}) adds read-only columns to a source's read, e.g. the lender
+    ownership fields for the closing-agent preview; without it every source is read exactly as configured.
 
     With sources.ringcx.backend: postgres, RingCX comes from `pg_source` (read-only database) instead of
     the sheet; with compare_with_sheets the sheet is also read, as tables["ringcx_sheet"], for comparison.
@@ -288,6 +291,7 @@ def read_all(cfg: dict, source, pg_source=None) -> tuple[dict[str, pd.DataFrame]
             if v is None:
                 continue
             cols.extend(v if isinstance(v, list) else [v])
+        cols = list(dict.fromkeys(cols + list((extra_columns or {}).get(key, []))))
         print(f"reading {key} / {s['worksheet']} ({len(cols)} columns)", flush=True)
         if hasattr(source, "start_source"):
             source.start_source()

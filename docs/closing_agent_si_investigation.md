@@ -1,6 +1,7 @@
 # Closing agent: SI ledger investigation (read-only, 24 Oct 2026)
 
-Status: **candidate only, not approved.** Nothing here is applied to the dashboard. Aggregates only; no phone
+Status: **superseded.** The owner confirmed on 24 Oct 2026 that the lender CRM records are the source of truth
+for the closing agent (`closing_agent_lender_mapping.md`); the SI tab is diagnostics only. Nothing here is applied to the dashboard. Aggregates only; no phone
 numbers, client names or deal records.
 
 ## Where the SI tab comes from
@@ -47,10 +48,3 @@ either side in sheet order are dated late April to mid May 2026, so it reads as 
 does **not** match any of the dashboard's closed deals. The preview never uses a ledger row dated after the run
 date ("invalid_date") and does not correct it.
 
-## Preview matching (diagnostic only)
-
-Closed deal (existing close rules) -> SI rows with the same normalized phone -> rows whose Consolidator is in
-the proposed lender values for the closing lender. 0 rows: `no_phone_match` / `lender_mismatch`; 2+ rows:
-`ambiguous` (none is chosen); 1 row: `invalid_date`, `missing`, `conflicting` (Agent differs from Cln Agent),
-`unmapped` (no approved full name) or `verified`. Only `verified` names a closer; it never falls back to the
-answering agent.
