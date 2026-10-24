@@ -616,6 +616,10 @@ def test_pg_query_is_read_only_bounded_parameterised_and_ordered(monkeypatch):
     df = src.read()
     assert "default_transaction_read_only=on" in opened["options"] and "statement_timeout=60000" in opened["options"]
     assert opened["connect_timeout"] == 15 and conn.read_only is True and conn.closed
+    assert "TimeZone" not in opened["options"]
+    _, opened_tz = pg_source(FakeConn(DB_ROWS), monkeypatch, cfg=pg_cfg(timestamp_timezone="America/New_York"))
+    _.read()
+    assert "-c TimeZone=America/New_York" in opened_tz["options"]
     import psycopg
 
     assert conn.isolation_level == psycopg.IsolationLevel.REPEATABLE_READ
@@ -770,13 +774,31 @@ def test_compare_order_difference_fails(cfg):
 
 def test_compare_missing_call_fails_but_later_snapshot_rows_only_warn(cfg):
     rep = validate.Report()
-    validate.compare_ringcx(rep, _prepared(CMP[:3]), _prepared(CMP[:2] + CMP[3:]), _leads(cfg), cfg)
+    validate.compare_ringcx(rep, _prepared(CMP[:2] + CMP[3:]), _prepared(CMP), _leads(cfg), cfg)   # earlier-day call missing
     assert any("call for call" in f for f in rep.failures) and any("call-result totals" in f for f in rep.failures)
+    rep = validate.Report()
+    validate.compare_ringcx(rep, _prepared(CMP[:3]), _prepared(CMP[:2] + CMP[3:]), _leads(cfg), cfg)
+    assert any("only adds calls" in f for f in rep.failures)        # the later snapshot lacks a last-shared-day call
     later = CMP + [("2026-05-13", "Inbound Accepted", "D", fake_phone(3))]   # database loaded a day later
     rep = validate.Report()
     facts = validate.compare_ringcx(rep, _prepared(later), _prepared(CMP), _leads(cfg), cfg)
     assert rep.ok and facts["rows after the compared day database / sheet (snapshot timing)"] == "1 / 0"
-    assert any("snapshots end on different days" in w for w in rep.warnings)
+    assert any("snapshots differ in timing" in w for w in rep.warnings)
+
+
+def test_compare_partial_last_day_only_warns_but_conflicting_last_day_fails(cfg):
+    partial = _prepared(CMP[:3])                         # sheet loaded mid-day: 2026-05-11 call not there yet
+    more = _prepared(CMP + [("2026-05-11", "Inbound Abandoned", "N/A", fake_phone(3))])
+    sheet_only_day = _prepared(CMP[:3] + [("2026-05-11", "Inbound Abandoned", "N/A", fake_phone(3))])
+    rep = validate.Report()
+    validate.compare_ringcx(rep, _prepared(CMP), partial, _leads(cfg), cfg)          # last shared day 05-10 identical
+    assert rep.ok
+    rep = validate.Report()
+    validate.compare_ringcx(rep, more, _prepared(CMP), _leads(cfg), cfg)              # database has extra on last day
+    assert rep.ok and any("snapshots differ in timing" in w for w in rep.warnings)
+    rep = validate.Report()
+    validate.compare_ringcx(rep, _prepared(CMP), sheet_only_day, _leads(cfg), cfg)    # each has a call the other lacks
+    assert any("only adds calls" in f for f in rep.failures)
 
 
 def test_postgres_cannot_publish_until_approved(tmp_path):

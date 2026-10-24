@@ -157,10 +157,20 @@ def compare_ringcx(rep: Report, db: pd.DataFrame, sheet: pd.DataFrame, leads: pd
         return {}
     end = min(db["date"].max(), sheet["date"].max())
     late_db, late_sheet = int((db["date"] > end).sum()), int((sheet["date"] > end).sum())
-    db, sheet = db[db["date"] <= end], sheet[sheet["date"] <= end]
 
     def keys(d):
         return Counter(d["date"].astype(str) + "|" + d["result"].astype(str) + "|" + d["agent"].astype(str) + "|" + d["phone"].astype(str))
+
+    # The last shared day may be only partly loaded in the earlier snapshot. Days before it must match
+    # exactly; on that day one source may only add calls to the other (a later load), never differ.
+    ea, eb = keys(db[db["date"] == end]), keys(sheet[sheet["date"] == end])
+    db_later, sheet_later = db["date"].max() > end, sheet["date"].max() > end
+    # Only the snapshot that reaches further may hold more of the last shared day.
+    end_superset = (not (eb - ea) if db_later else True) and (not (ea - eb) if sheet_later else True) \
+        and (not (ea - eb) or not (eb - ea))
+    end_extra = sum((ea - eb).values()) + sum((eb - ea).values())
+    through = end if ea == eb else end - pd.Timedelta(days=1)   # identical last day: compare it exactly too
+    db, sheet = db[db["date"] <= through], sheet[sheet["date"] <= through]
 
     a, b = keys(db), keys(sheet)
     only_db, only_sheet = sum((a - b).values()), sum((b - a).values())
@@ -170,6 +180,8 @@ def compare_ringcx(rep: Report, db: pd.DataFrame, sheet: pd.DataFrame, leads: pd
 
     def first_agents(d):
         x = d[d["result"] == acc].sort_values(["date", "_row"], kind="mergesort")
+        if x.empty:
+            return pd.Series(dtype=object, index=pd.MultiIndex.from_tuples([], names=["phone", "date"]))
         n = x.groupby(["phone", "date"])["agent"].nunique()
         multi = set(n[n > 1].index)
         x = x[[k in multi for k in zip(x["phone"], x["date"])]]
@@ -185,7 +197,8 @@ def compare_ringcx(rep: Report, db: pd.DataFrame, sheet: pd.DataFrame, leads: pd
     agent_diff = int((m["agent"] != m["agent_sheet"]).sum())
 
     facts = {
-        "compared through": f"{end:%Y-%m-%d}",
+        "compared exactly through": f"{through:%Y-%m-%d}",
+        "last shared day (one source may hold more of it)": f"{end:%Y-%m-%d}: {end_extra} call(s) differ",
         "ringcx rows database / sheet": f"{len(db)} / {len(sheet)}",
         "rows after the compared day database / sheet (snapshot timing)": f"{late_db} / {late_sheet}",
         "accepted calls database / sheet": f"{int((db['result'] == acc).sum())} / {int((sheet['result'] == acc).sum())}",
@@ -196,11 +209,14 @@ def compare_ringcx(rep: Report, db: pd.DataFrame, sheet: pd.DataFrame, leads: pd
     }
     rep.check(only_db == 0 and only_sheet == 0, "ringcx database matches the sheet call for call",
               f"{only_db} only in database, {only_sheet} only in sheet")
+    rep.check(end_superset, f"on {end:%Y-%m-%d} one source only adds calls to the other",
+              "each source has calls the other lacks")
     rep.check(not res_diff, "ringcx call-result totals match the sheet",
               ", ".join(f"{k}: {v:+d}" for k, v in sorted(res_diff.items())))
     rep.check(tie_diff == 0, "database order settles same-day agent ties as the sheet does", f"{tie_diff} of {len(both)} differ")
     rep.check(ans_diff == 0 and agent_diff == 0, "agent attribution matches the sheet for every selected lead",
               f"{ans_diff} answered and {agent_diff} agent differences")
-    if late_db or late_sheet:
-        rep.warn(f"RingCX snapshots end on different days; {late_db} database and {late_sheet} sheet row(s) after {end:%Y-%m-%d} not compared")
+    if late_db or late_sheet or end_extra:
+        rep.warn(f"RingCX snapshots differ in timing: {end_extra} call(s) on {end:%Y-%m-%d} and {late_db} database / "
+                 f"{late_sheet} sheet row(s) after it are not compared")
     return facts

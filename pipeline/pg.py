@@ -124,8 +124,10 @@ class PostgresRingcxSource:
 
             connect = psycopg.connect
         ms = int(self.pg["statement_timeout_s"]) * 1000
-        return connect(dsn, connect_timeout=self.CONNECT_TIMEOUT, application_name="bff-dashboard-readonly",
-                       options=f"-c statement_timeout={ms} -c default_transaction_read_only=on")
+        opts = f"-c statement_timeout={ms} -c default_transaction_read_only=on"
+        if self.pg.get("timestamp_timezone"):   # validated IANA name: the date bound is applied in the reporting zone
+            opts += f" -c TimeZone={self.pg['timestamp_timezone']}"
+        return connect(dsn, connect_timeout=self.CONNECT_TIMEOUT, application_name="bff-dashboard-readonly", options=opts)
 
     def read(self) -> pd.DataFrame:
         import psycopg
