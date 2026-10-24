@@ -905,7 +905,11 @@ def _assign(cfg, leads, tables, name_map=NAMES):
 def test_shipped_config_keeps_lender_closer_in_preview():
     c = load_config(CFG_PATH)
     ca = c["closing_agent"]
-    assert ca["source"] is None and ca["lender_mapping"]["name_map"] is None
+    assert ca["source"] is None                                         # production attribution stays off
+    assert ca["lender_mapping"]["name_map"] == {                        # exactly the nine owner-approved values
+        "Benjamin Hall": "Benjamin Hall", "BENJAMIN HALL": "Benjamin Hall", "Ian Rawley": "Ian Rawley",
+        "Geneva Lumbley": "Geneva Lumbley", "Lizbeth Dominguez": "Lizbeth Dominguez", "Camaran Hyder": "Camaran Hyder",
+        "Kris Seiverd": "Kris Seiverd", "Noah Hanusey": "Noah Hanusey", "JAV HYDER": "Jav Hyder"}
     assert ca["lender_mapping"]["lender_values_approved"] is False
     assert ca["lender_mapping"]["fields"] == {"citizen": ["Assignees"], "cordoba": ["Assigned To"],
                                               "debtblue": ["Assigned To"]}
@@ -957,7 +961,7 @@ def test_missing_and_blank_ownership_never_fall_back(cfg):
 def test_system_accounts_and_lender_staff_are_not_bff(cfg):
     L = _closed_leads(["citizen", "cordoba", "debtblue", "debtblue"])
     T = _tables(citizen=[{"Created By": "JAY MUDRA", "Assignees": "BFF API"}],
-                cordoba=[{"_row": 3, "Assigned To": "Jacob Aparecio"}],
+                cordoba=[{"_row": 3, "Assigned To": "0.0"}],
                 debtblue=[{"_row": 4, "Assigned To": "Mayra Vazquez", "Assigned Company": "Debt Blue Servicing"},
                           {"_row": 5, "Assigned To": "Jay Mudra", "Assigned Company": "Council Law Group"}])
     out = _assign(cfg, L, T)
@@ -1021,6 +1025,74 @@ def test_closer_uses_the_matched_lender_record_only(cfg):
     T = _tables(cordoba=[{"_row": 2, "Assigned To": "Ian Rawley"}, {"_row": 9, "Assigned To": "Jay Mudra"}],
                 citizen=[{"_row": 2, "Created By": "JAY MUDRA", "Assignees": "JAY MUDRA"}])
     assert _assign(cfg, L, T)["closing_agent"][0] == "Ian Rawley"
+
+
+def test_approved_name_map_leaves_unresolved_values_unknown():
+    c = load_config(CFG_PATH)
+    L = _closed_leads(["citizen", "cordoba", "cordoba", "cordoba", "debtblue", "citizen"])
+    T = _tables(citizen=[{"_row": 2, "Assignees": "CAM HYDER"}, {"_row": 7, "Assignees": "JAV HYDER"}],
+                cordoba=[{"_row": 3, "Assigned To": "Jay Mudra"}, {"_row": 4, "Assigned To": "Andrew Patszalek"},
+                         {"_row": 5, "Assigned To": "Camaran Hyder"}],
+                debtblue=[{"_row": 6, "Assigned To": "Mayra Vazquez", "Assigned Company": "Debt Blue Servicing"}])
+    out = _assign(c, L, T, name_map=c["closing_agent"]["lender_mapping"]["name_map"])
+    assert list(out["closer_status"]) == ["unmapped", "unmapped", "unmapped", "verified", "non_bff", "verified"]
+    assert list(out["closing_agent"]) == ["Closer unknown"] * 3 + ["Camaran Hyder", "Closer unknown", "Jav Hyder"]
+
+
+def test_jacob_aparecio_is_unverified_not_non_bff():
+    c = load_config(CFG_PATH)
+    lm = c["closing_agent"]["lender_mapping"]
+    assert "Jacob Aparecio" not in lm["non_bff_values"]["cordoba"]
+    assert not any("aparecio" in k.lower() for k in lm["name_map"])            # not approved either
+    out = _assign(c, _closed_leads(["cordoba"]), _tables(cordoba=[{"Assigned To": "Jacob Aparecio"}]), name_map=lm["name_map"])
+    assert out["closer_status"][0] == "unmapped" and out["closing_agent"][0] == "Closer unknown"
+
+
+@pytest.mark.parametrize("preview", [True, False])
+def test_build_closer_step_receives_the_approved_name_map(tmp_path, monkeypatch, preview):
+    """Wiring check on the real build path: --closer-preview must hand the APPROVED name_map (never
+    proposed_name_map) to the closer step, and a normal run must leave closer attribution off. Every source
+    read and earlier step is stubbed (no network, no data); the spy stops the run once it has its arguments."""
+    from pipeline import build
+
+    seen = {}
+    STUB = {"ringba": None, "ringcx": None}                              # keys build.run indexes before the closer step
+
+    class Stop(Exception):
+        pass
+
+    def spy(leads, tables, cfg, use_lender, name_map=None):
+        seen.update(use_lender=use_lender, name_map=name_map, tables=tables)
+        raise Stop
+
+    def fake_read_all(cfg, source, pg, extra_columns=None):
+        seen["extra_columns"] = extra_columns
+        return STUB, {}
+
+    leads = pd.DataFrame({"phone": [fake_phone(1)], "call_time": pd.to_datetime(["2026-05-01"])})
+    monkeypatch.setattr(build, "GoogleSheetsSource", lambda: object())
+    monkeypatch.setattr(build, "read_all", fake_read_all)
+    monkeypatch.setattr(build.validate, "check_sources", lambda *a, **k: None)
+    monkeypatch.setattr(build.validate, "check_statuses", lambda *a, **k: None)
+    monkeypatch.setattr(build.rules, "unknown_statuses", lambda *a, **k: {})
+    monkeypatch.setattr(build.rules, "prepare_ringba", lambda *a, **k: None)
+    monkeypatch.setattr(build.rules, "select_paid_leads", lambda *a, **k: (leads, {"paid_rows_unparsed_time": 0}))
+    monkeypatch.setattr(build.rules, "prepare_ringcx", lambda *a, **k: None)
+    monkeypatch.setattr(build.rules, "match_agents", lambda l, *a, **k: l)
+    monkeypatch.setattr(build.rules, "prepare_lenders", lambda *a, **k: None)
+    monkeypatch.setattr(build.rules, "match_closes", lambda l, *a, **k: (l, pd.DataFrame()))
+    monkeypatch.setattr(build.rules, "assign_closers", spy)
+
+    rc = build.main(["--out", str(tmp_path), "--preview"] + (["--closer-preview"] if preview else []))
+    lm = load_config(CFG_PATH)["closing_agent"]["lender_mapping"]
+    assert rc == 1 and not (tmp_path / "site").exists()                 # the spy stopped the run before any output
+    assert seen["name_map"] == lm["name_map"] and len(seen["name_map"]) == 9   # approved map, in both modes
+    assert seen["name_map"] != lm["proposed_name_map"]
+    if preview:
+        assert seen["use_lender"] is True and seen["tables"] is STUB
+        assert seen["extra_columns"] == rules.lender_closer_columns(load_config(CFG_PATH))
+    else:                                                                # normal run: attribution stays off
+        assert seen["use_lender"] is False and seen["tables"] is None and seen["extra_columns"] is None
 
 
 def test_closer_preview_reads_ownership_columns_only_when_asked(cfg, tmp_path):

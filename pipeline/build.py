@@ -129,11 +129,11 @@ def run(args) -> int:
     if ca:
         use = ca["source"] == "lender" or args.closer_preview
         lm = ca["lender_mapping"]
-        # Approved runs use only the approved name map; a preview shows the proposed map, clearly labelled.
-        nmap = lm["name_map"] if ca["source"] == "lender" else lm.get("proposed_name_map")
+        # Only owner-approved names (name_map) are ever used, in a preview and in an approved run alike.
+        nmap = lm["name_map"]
         leads = rules.assign_closers(leads, tables if use else None, cfg, use_lender=use, name_map=nmap)
         counts = rules.closer_counts(leads, cfg)
-        label = "approved lender mapping" if ca["source"] == "lender" else ("lender fields, PROPOSED mapping, preview only" if use else "not enabled")
+        label = "approved lender mapping" if ca["source"] == "lender" else ("lender fields, approved names, preview only" if use else "not enabled")
         facts[f"closing agent ({label})"] = ", ".join(f"{k.replace('_', ' ')} {v}" for k, v in counts.items())
         unknown = {k: v for k, v in counts.items() if not k.startswith("verified") and v}
         if ca["source"] == "lender" and unknown:
@@ -201,7 +201,7 @@ def write_closer_preview(path: Path, leads, cfg: dict) -> None:
     lines = ["# Closing-agent preview (diagnostic only, not published)", "",
              "Source: the matched lender CRM record's ownership fields. RingCX and the SI tab are not used.",
              f"Lender mapping approved: {lm['lender_values_approved']}. Name map: "
-             + ("approved" if cfg["closing_agent"]["source"] == "lender" else "PROPOSED: verified dashboard agent names + approved alias Ben Hall"), "",
+             + ("approved" if cfg["closing_agent"]["source"] == "lender" else "approved names (name_map) + approved alias Ben Hall; preview only"), "",
              "Fields: " + "; ".join(f"{k}: {' + '.join(v)}" for k, v in lm["fields"].items()), "",
              "## All lenders", ""] + [f"- {k.replace('_', ' ')}: {v}" for k, v in total.items()]
     for k, v in d.items():

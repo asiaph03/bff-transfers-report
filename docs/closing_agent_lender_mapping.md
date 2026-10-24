@@ -17,7 +17,7 @@ is diagnostics only (see `closing_agent_si_investigation.md`). Counts below come
 | Citizen | Created By | 1,728 | BFF agent names (upper case); "BFF API" on 168 (system account) | not used (owner decision) |
 | Citizen | Assignees | 1,728 | BFF agent names; blank on 65; "BFF API" on 19 | ownership (owner decision) |
 | Citizen | Campaign Name | 1,728 | "General" on all | not usable |
-| Cordoba | Assigned To | 645 | BFF agent names (title case); "Jacob Aparecio" on 6 (not a BFF agent name seen elsewhere) | ownership |
+| Cordoba | Assigned To | 645 | BFF agent names (title case); "Jacob Aparecio" on 6 (unverified name; see below) | ownership |
 | Cordoba | Created By | 645 | "0.0" on 642, "Jacob Aparecio" on 3 | not usable |
 | DebtBlue | Assigned To | 50 | blank 19; DebtBlue / Council Law staff on 27; BFF-like names on 4 | ownership only with the company check |
 | DebtBlue | Assigned Company | 50 | Debt Blue Servicing 36, Council Law Group 13, Better Future Finance 1 | must be Better Future Finance |
@@ -31,6 +31,12 @@ is reliably "the" closer; where Created By is "BFF API", Assignees matches the S
 Cordoba: Assigned To matches the SI credit (diagnostic) on 382 of 473 comparable records; most differences are
 spellings of the same person (e.g. "Andrew Patszalek"/"ANDREW PATS", "Camaran Hyder"/"CAM HYDER").
 
+Jacob Aparecio (correction, 24 Oct 2026): he is listed as a user with a BFF email address in the CRM user lists
+("Agent ID" tabs) of both the Cordoba and DebtBlue workbooks, so he is no longer classified as a non-BFF value in
+`config/report.yaml`. He is not in `name_map`, so his values are an unverified (`unmapped`) name and his records
+still show "Closer unknown" until his display name is explicitly approved. He is not a confirmed closer for any
+deal.
+
 DebtBlue: Assigned To mostly names lender servicing staff; only the record whose Assigned Company is Better Future
 Finance can carry a BFF agent. BFF-like names under other companies ("Arturo Valenzuela", "Austin Bushen",
 "Javid Hyder") are not attributed.
@@ -41,6 +47,8 @@ The matched lender record from `match_closes` (same phone normalization, closed-
 precedence rules) supplies the fields. All blank -> `missing`; a system/lender-staff value or a failed company
 check -> `non_bff`; two fields naming different people -> `conflicting`; one of two fields blank -> `partial`;
 a name without an approved display name -> `unmapped`; otherwise `verified`. Only `verified` shows a name;
-everything else is "Closer unknown". The preview uses `proposed_name_map` (only lender values that equal an agent
-name already on the dashboard, ignoring case, plus the approved alias Ben Hall -> Benjamin Hall); an approved
-run would use `name_map`, which is null. The original lender value is kept in the preview for review.
+everything else is "Closer unknown". `--closer-preview` uses the approved `name_map` (nine exact lender values,
+matched ignoring case, plus the approved alias Ben Hall -> Benjamin Hall) and labels its output "approved names".
+`proposed_name_map` is kept for reference only and is not used by the preview. Production closer attribution
+stays disabled because `source` is null and `lender_values_approved` is false, and `closing_agent` is not
+published. The original lender value is kept in the preview for review.

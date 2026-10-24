@@ -147,12 +147,22 @@ closing_agent:
       debtblue: {column: Assigned Company, values: [Better Future Finance]}
     non_bff_values:                # system accounts and lender staff: never attributed (case-insensitive)
       citizen: [BFF API]
-      cordoba: ["0.0", Jacob Aparecio]
+      cordoba: ["0.0"]
       debtblue: [Mayra Vazquez, Olamide Adejumo, Maritza Guzman, Jill Lacy, Roxana Villalta, Osato Iredia, Steve Bellew]
-    name_map: null                 # APPROVED lender value -> agent display name; null = none approved
-    # Preview only: the verified BFF agent names (lender values equal, ignoring case, to an agent name already
-    # used on the dashboard). The approved agent_match alias (Ben Hall -> Benjamin Hall) also applies. Every
-    # other value stays unmapped until the owner approves it; no spelling alias is implied.
+    # APPROVED lender value -> agent display name (owner approval, 24 Oct 2026: these nine exact values only).
+    # Matched ignoring case; the approved agent_match alias (Ben Hall -> Benjamin Hall) also applies. Every other
+    # value stays "Closer unknown". Used by --closer-preview now; production use still needs source: lender.
+    name_map:
+      Benjamin Hall: Benjamin Hall           # Cordoba Assigned To
+      BENJAMIN HALL: Benjamin Hall           # Citizen Assignees
+      Ian Rawley: Ian Rawley                 # Cordoba
+      Geneva Lumbley: Geneva Lumbley         # Cordoba
+      Lizbeth Dominguez: Lizbeth Dominguez   # Cordoba
+      Camaran Hyder: Camaran Hyder           # Cordoba spelling only (Citizen "CAM HYDER" is NOT approved)
+      Kris Seiverd: Kris Seiverd             # Cordoba
+      Noah Hanusey: Noah Hanusey             # Cordoba
+      JAV HYDER: Jav Hyder                   # Citizen
+    # Reference only (no longer used by the preview): earlier exact-name proposal, not approved.
     proposed_name_map:
       ARTURO VALENZUELA: Arturo Valenzuela
       AUSTIN BUSH: Austin Bush

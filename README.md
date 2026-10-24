@@ -99,10 +99,13 @@ source until `approved_for_dashboard: true`.
   DebtBlue: Assigned To when Assigned Company is Better Future Finance). RingCX and the SI tab are never used to
   pick a closer. System accounts, lender staff, blanks, conflicts and names without an approved display name
   show "Closer unknown".
-- Not enabled yet (`closing_agent.source: null`, `lender_values_approved: false`, `name_map: null`), so every
-  closed deal is "Closer unknown" and `closing_agent` is not published. `--closer-preview` reads the ownership
-  fields and writes per-lender counts to `out/closing_agent_preview.md` (outside `site/`, never published; no
-  phones or deal rows), using the proposed name map. Details: `docs/closing_agent_lender_mapping.md`.
+- Not enabled yet (`closing_agent.source: null`, `lender_values_approved: false`), so production runs do not
+  attribute closers and `closing_agent` is not published. `name_map` holds nine owner-approved lender values
+  (exact names, matched ignoring case); every other value stays "Closer unknown". `--closer-preview` reads the
+  ownership fields, uses the approved `name_map` (labelled "approved names"), and writes per-lender counts to
+  `out/closing_agent_preview.md` (outside `site/`, never published; no phones or deal rows).
+  `proposed_name_map` is reference only and is not used by the preview. Details:
+  `docs/closing_agent_lender_mapping.md`.
 - Enabling it needs: approved fields and non-BFF values (`lender_values_approved: true`), an approved
   `name_map`, `source: lender`, and `closing_agent` added to `publish.fields` (the config check enforces this).
 
