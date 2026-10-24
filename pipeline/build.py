@@ -24,6 +24,7 @@ from pathlib import Path
 from . import rules, validate
 from .config import ConfigError, load_config
 from .sheets import GoogleSheetsSource, LocalSource, SourceError, assert_no_secret, read_all
+from .timing import StageTimer, peak_memory_mb
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -55,12 +56,20 @@ def run(args) -> int:
     facts: dict = {}
     started = dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
     facts["build started (UTC)"] = started.isoformat()
+    timer, fetch = StageTimer(), {}
+
+    def done(site: Path | None) -> int:
+        """Finish the run with timings (per-source fetch, per stage, peak memory) added to the report facts.
+        The last lap also holds the time of the stage that stopped a failed run."""
+        timer.lap("finish")
+        facts.update(timer.facts(fetch, peak_memory_mb()))
+        return finish(rep, facts, out, site)
 
     try:
         cfg = load_config(args.config)
     except ConfigError as e:
         rep.check(False, "config is valid", str(e))
-        return finish(rep, facts, out, None)
+        return done(None)
     rep.check(True, "config is valid")
 
     try:
@@ -76,12 +85,12 @@ def run(args) -> int:
             problems = check_pg_config(rcx.get("postgres"))
             if problems:
                 rep.check(False, "PostgreSQL RingCX mapping is complete", "; ".join(problems))
-                return finish(rep, facts, out, None)
+                return done(None)
             pgc = rcx["postgres"]
             if not args.preview and not pgc["approved_for_dashboard"]:
                 rep.check(False, "PostgreSQL RingCX source approved for the dashboard",
                           "not approved: run with --preview to compare it with the sheet")
-                return finish(rep, facts, out, None)
+                return done(None)
             if not (pgc["order_by_approved"] and pgc["approved_for_dashboard"]):
                 pgc["compare_with_sheets"] = True   # until approved, every database run is checked against the sheet
             from .pg import PostgresRingcxSource
@@ -93,27 +102,30 @@ def run(args) -> int:
         ca = cfg.get("closing_agent")
         closer_on = bool(ca) and (ca["source"] == "lender" or args.closer_preview)
         extra = rules.lender_closer_columns(cfg) if closer_on else None
-        tables, closed_tab_rows = read_all(cfg, source, pg_source, extra_columns=extra)
+        tables, closed_tab_rows = read_all(cfg, source, pg_source, extra_columns=extra, timings=fetch)
+        timer.lap("read sources")
         if pg_source is not None:
             facts.update({f"ringcx db {k.replace('_', ' ')}": v for k, v in pg_source.diag.items()})
     except SourceError as e:
         rep.check(False, "all sources readable", str(e))
-        return finish(rep, facts, out, None)
+        return done(None)
     rep.check(True, "all five sources readable with required columns")
     validate.check_sources(rep, tables, cfg)
     validate.check_statuses(rep, rules.unknown_statuses(tables, cfg))
     if closed_tab_rows:
         validate.check_closed_tabs(rep, rules.closed_status_rows(tables, cfg), closed_tab_rows)
+    timer.lap("validate inputs")
 
     ringba = rules.prepare_ringba(tables["ringba"], cfg)
     try:
         leads, diag = rules.select_paid_leads(ringba, cfg)
     except rules.RuleError as e:
         rep.check(False, "enough paid leads", str(e))
-        return finish(rep, facts, out, None)
+        return done(None)
     facts.update({k.replace("_", " "): v for k, v in diag.items()})
     rep.check(diag["paid_rows_unparsed_time"] <= cfg["validation"]["max_unparsed_paid_call_times"],
               "paid calls have readable call times", f"{diag['paid_rows_unparsed_time']} unreadable")
+    timer.lap("parse ringba, select paid leads")
 
     ringcx = rules.prepare_ringcx(tables["ringcx"], cfg)
     leads_before_match = leads
@@ -123,8 +135,10 @@ def run(args) -> int:
         if "ringcx_sheet" in tables:
             sheet_rcx = rules.prepare_ringcx(tables["ringcx_sheet"], cfg)
             facts.update(validate.compare_ringcx(rep, ringcx, sheet_rcx, leads_before_match, cfg))
+    timer.lap("parse ringcx, match agents")
     crm = rules.prepare_lenders(tables, cfg)
     leads, excluded = rules.match_closes(leads, crm, cfg)
+    timer.lap("parse lenders, match closes")
     ca = cfg.get("closing_agent")
     if ca:
         use = ca["source"] == "lender" or args.closer_preview
@@ -139,6 +153,7 @@ def run(args) -> int:
         if ca["source"] == "lender" and unknown:
             rep.warn("closing agent unknown for " + ", ".join(f"{v} {k.replace('_', ' ')}" for k, v in unknown.items())
                      + " closed deal(s)")
+    timer.lap("closing agent")
     validate.check_business(rep, leads, ringcx, excluded, cfg)
 
     if cfg["validation"]["data_gaps"]["warn_months_without_calls"]:
@@ -146,12 +161,15 @@ def run(args) -> int:
         if gaps:
             rep.warn(f"Ringba has no calls in {', '.join(gaps)} (inside the reporting window)")
 
+    timer.lap("validate business rules")
     rows = rules.to_public_rows(leads, cfg)
     if args.closer_preview and "closing_agent" in leads:
         write_closer_preview(out / "closing_agent_preview.md", leads, cfg)
     totals = rules.summarize(rows)
     validate.check_output(rep, rows, totals, cfg)
+    timer.lap("build public rows")
     baseline = fetch_baseline(cfg["publish"]["site_url"])
+    timer.lap("fetch published baseline")
     if baseline is None and args.preview:
         rep.warn("no published baseline yet; this preview cannot be compared with a previous release")
     else:
@@ -179,8 +197,9 @@ def run(args) -> int:
     facts.update({"leads": totals["leads"], "closed": totals["closed"], "active": totals["active"],
                   "debt enrolled": totals["debt_enrolled"], "payout": totals["payout"],
                   "paid calls from": totals["first_paid_call"], "paid calls to": totals["last_paid_call"]})
+    timer.lap("final checks")
     if not rep.ok:
-        return finish(rep, facts, out, None)
+        return done(None)
     site.mkdir(parents=True)
     (site / "vendor").mkdir()
     (site / "index.html").write_text(page, encoding="utf-8")
@@ -189,7 +208,7 @@ def run(args) -> int:
     (site / "summary.json").write_text(summary_text, encoding="utf-8")
     (site / ".nojekyll").write_text("", encoding="utf-8")
     facts["refreshed_at"] = refreshed
-    return finish(rep, facts, out, site)
+    return done(site)
 
 
 def write_closer_preview(path: Path, leads, cfg: dict) -> None:

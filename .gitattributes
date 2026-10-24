@@ -1,0 +1,4 @@
+# The vendored chart library is checked against a recorded SHA-256 (site/vendor/SHA256SUMS) on every build.
+# Never convert its line endings: with core.autocrlf=true (the Windows default) a checkout would rewrite it
+# and fail that check.
+site/vendor/* -text

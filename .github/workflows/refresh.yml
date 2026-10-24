@@ -48,7 +48,7 @@ jobs:
         run: pip install -r pipeline/requirements.txt
 
       - name: Rule tests (synthetic data)
-        run: python -m pytest -q pipeline/test_rules.py
+        run: python -m pytest -q pipeline
 
       - name: Check config
         run: python -m pipeline.build --check-config

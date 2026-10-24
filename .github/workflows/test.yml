@@ -22,5 +22,5 @@ jobs:
           cache: pip
           cache-dependency-path: pipeline/requirements.txt
       - run: pip install -r pipeline/requirements.txt
-      - run: python -m pytest -q pipeline/test_rules.py
+      - run: python -m pytest -q pipeline
       - run: python -m pipeline.build --check-config

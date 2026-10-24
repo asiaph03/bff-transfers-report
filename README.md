@@ -214,9 +214,31 @@ block publishing and are shown at the bottom of the page.
 
 ```
 pip install -r pipeline/requirements.txt
-python -m pytest -q pipeline/test_rules.py
+python -m pytest -q pipeline
 python -m pipeline.build --check-config
 ```
+
+### Speed and timings
+
+The validation report (`out/validation.md`) lists, for every run, the seconds spent reading each source and
+each Closed tab (with rows read and retries), the seconds per stage, and the peak memory. A source that fails
+is still listed, so a slow or failing read shows up by name.
+
+Dates, phone numbers, text, numbers and booleans are parsed a column at a time (`*_series` in
+`pipeline/rules.py`). The one-value functions beside them define the rules; `pipeline/test_vectorized.py`
+holds the column versions to exactly the same answers, including odd values.
+
+To measure calculation time on made-up data (no Google access, no client data), from the repository root:
+
+```
+python -m benchmarks.synth --rows 100000 --seed 1
+python -m benchmarks.bench_pipeline --rows 100000 --seed 1 --label before
+# change the code, then check the output is unchanged as well as faster:
+python -m benchmarks.bench_pipeline --rows 100000 --seed 1 --label after --compare out/bench/before_100000_1.json
+```
+
+The comparison fingerprints every intermediate table and the published rows and exits 1 on any difference.
+Results are written under `out/`, which is not committed.
 
 To build from exported copies on your own machine, list them in a JSON file kept outside the repository
 (`{"ringba": "path/Ringba Call Tracker.xlsx", "ringcx": "path/Two Minute Transfers.csv", ...}`) and run

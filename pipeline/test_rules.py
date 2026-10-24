@@ -1075,7 +1075,7 @@ def test_build_closer_step_receives_the_approved_name_map(tmp_path, monkeypatch,
         seen.update(use_lender=use_lender, name_map=name_map, tables=tables)
         raise Stop
 
-    def fake_read_all(cfg, source, pg, extra_columns=None):
+    def fake_read_all(cfg, source, pg, extra_columns=None, timings=None):
         seen["extra_columns"] = extra_columns
         return STUB, {}
 

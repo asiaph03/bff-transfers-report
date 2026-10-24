@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 import re
+import time
 from pathlib import Path
 
 import pandas as pd
@@ -103,6 +104,7 @@ class GoogleSheetsSource:
             self.session = AuthorizedSession(credentials, max_refresh_attempts=1)
         self.job_deadline = self.clock() + self.JOB_BUDGET
         self.source_deadline = self.job_deadline
+        self.retries = 0               # retried attempts so far (read_all reports the count per source)
 
     def start_source(self) -> None:
         """Begin the time budget for the next source (bounded by the job budget)."""
@@ -142,6 +144,7 @@ class GoogleSheetsSource:
                     raise SourceError(f"{where}: Google Sheets still unavailable when the time budget ran out "
                                       f"after {attempt - 1} attempt(s); last: {last}")
                 print(f"  {where}: retrying in {wait:.0f}s", flush=True)
+                self.retries += 1
                 self.sleep(wait)
             t0 = self.clock()
             retry_after = None
@@ -267,22 +270,38 @@ class LocalSource:
         return sum(1 for r in rows if any(v not in (None, "") for v in list(r)[:5]))
 
 
-def read_all(cfg: dict, source, pg_source=None, extra_columns: dict | None = None) -> tuple[dict[str, pd.DataFrame], dict[str, int]]:
+def read_all(cfg: dict, source, pg_source=None, extra_columns: dict | None = None,
+             timings: dict | None = None) -> tuple[dict[str, pd.DataFrame], dict[str, int]]:
     """Read every configured worksheet and each lender's Closed tab row count.
 
     `extra_columns` ({source key: [column, ...]}) adds read-only columns to a source's read, e.g. the lender
     ownership fields for the closing-agent preview; without it every source is read exactly as configured.
 
+    `timings`, when given, is filled as {name: {"seconds", "rows", "retries"}} for each worksheet read and
+    each Closed-tab count, in read order, so a slow source shows up by name. A source that fails is still
+    recorded (rows None) before the error is raised, so the report shows where the time went.
+
     With sources.ringcx.backend: postgres, RingCX comes from `pg_source` (read-only database) instead of
     the sheet; with compare_with_sheets the sheet is also read, as tables["ringcx_sheet"], for comparison.
     """
     tables, closed_counts = {}, {}
+
+    def record(name: str, t0: float, r0: int, rows: int | None) -> None:
+        if timings is not None:
+            timings[name] = {"seconds": round(time.perf_counter() - t0, 2), "rows": rows,
+                             "retries": getattr(source, "retries", 0) - r0}
+
     for key, s in cfg["sources"].items():
         if key == "ringcx" and s.get("backend") == "postgres":
             print("reading ringcx / PostgreSQL (read-only)", flush=True)
             if pg_source is None:
                 raise SourceError("ringcx: backend is postgres but no database source was set up")
-            tables[key] = pg_source.read()
+            t0, r0, n = time.perf_counter(), getattr(source, "retries", 0), None
+            try:
+                tables[key] = pg_source.read()
+                n = len(tables[key])
+            finally:
+                record("ringcx (database)", t0, r0, n)
             if not (s.get("postgres") or {}).get("compare_with_sheets"):
                 continue
             key = "ringcx_sheet"
@@ -295,17 +314,26 @@ def read_all(cfg: dict, source, pg_source=None, extra_columns: dict | None = Non
         print(f"reading {key} / {s['worksheet']} ({len(cols)} columns)", flush=True)
         if hasattr(source, "start_source"):
             source.start_source()
-        if isinstance(source, LocalSource):
-            tables[key] = source.read_key("ringcx" if key == "ringcx_sheet" else key, s["worksheet"], cols)
-        else:
-            tables[key] = source.read(s["spreadsheet_id"], s["worksheet"], cols, whole_tab=bool(s.get("read_whole_tab")))
+        t0, r0, n = time.perf_counter(), getattr(source, "retries", 0), None
+        try:
+            if isinstance(source, LocalSource):
+                tables[key] = source.read_key("ringcx" if key == "ringcx_sheet" else key, s["worksheet"], cols)
+            else:
+                tables[key] = source.read(s["spreadsheet_id"], s["worksheet"], cols, whole_tab=bool(s.get("read_whole_tab")))
+            n = len(tables[key])
+        finally:
+            record(key, t0, r0, n)
         print(f"  {key}: {len(tables[key])} rows", flush=True)
         ct = s.get("closed_tab")
         if ct and cfg["validation"].get("closed_tab_cross_check"):
-            if isinstance(source, LocalSource):
-                closed_counts[key] = source.count_rows_key(key, ct["worksheet"], ct["has_header"])
-            else:
-                closed_counts[key] = source.count_rows(s["spreadsheet_id"], ct["worksheet"], ct["has_header"])
+            t0, r0 = time.perf_counter(), getattr(source, "retries", 0)
+            try:
+                if isinstance(source, LocalSource):
+                    closed_counts[key] = source.count_rows_key(key, ct["worksheet"], ct["has_header"])
+                else:
+                    closed_counts[key] = source.count_rows(s["spreadsheet_id"], ct["worksheet"], ct["has_header"])
+            finally:
+                record(f"{key} closed tab", t0, r0, closed_counts.get(key))
     return tables, closed_counts
 
 

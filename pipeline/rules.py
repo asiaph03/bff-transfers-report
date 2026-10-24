@@ -77,18 +77,182 @@ def clean_text(v) -> str:
     return str(v).strip()
 
 
+# ---------- column parsers ----------
+# The scalar parsers above define the rules. The *_series functions apply the same rules to a whole column
+# at once: the common value types (numbers, text, booleans, blanks) are converted in bulk, and anything
+# unusual is handed back to the scalar parser, so the result is the same as `column.map(scalar_parser)`.
+# test_vectorized.py holds that equivalence on edge cases and on randomised mixed columns.
+
+_NONE, _FLOAT, _INT, _BOOL, _STR, _OTHER = range(6)
+_KIND = {type(None): _NONE, bool: _BOOL, np.bool_: _BOOL, str: _STR, np.str_: _STR, float: _FLOAT, int: _INT,
+         **{t: _FLOAT for t in (np.float16, np.float32, np.float64)},
+         **{t: _INT for t in (np.int8, np.int16, np.int32, np.int64, np.uint8, np.uint16, np.uint32, np.uint64)}}
+_ISO_TIME = r"[0-9]{4}-[0-9]{2}-[0-9]{2}(?:[ T][0-9]{2}:[0-9]{2}(?::[0-9]{2}(?:\.[0-9]{1,9})?)?)?"
+_PLAIN_NUMBER = r"-?[0-9]+(?:\.[0-9]+)?"
+
+
+def _kinds(vals: np.ndarray) -> np.ndarray:
+    get = _KIND.get
+    return np.fromiter((get(type(v), _OTHER) for v in vals), dtype=np.int8, count=len(vals))
+
+
+def _fill_serial(out: np.ndarray, idx: np.ndarray, x: np.ndarray) -> None:
+    """Spreadsheet serial day numbers in `x` (floats) into `out[idx]` as the scalar parse_time does:
+    1 <= serial < 200000, rounded to the millisecond. NaN and out-of-range values stay NaT."""
+    ok = (x >= 1) & (x < 200000)
+    if ok.any():
+        out[idx[ok]] = (EXCEL_EPOCH + pd.to_timedelta(x[ok], unit="D")).round("ms").to_numpy(dtype="datetime64[ns]")
+
+
+def _parse_time_fast(s: pd.Series) -> np.ndarray | None:
+    """datetime64[ns] values for `s`, or None when a value needs the scalar parser's full rules."""
+    n = len(s)
+    out = np.full(n, np.datetime64("NaT"), dtype="datetime64[ns]")
+    if s.dtype.kind in "fiu":
+        _fill_serial(out, np.arange(n), s.to_numpy(dtype=np.float64))
+        return out
+    vals = s.to_numpy(dtype=object)
+    kinds = _kinds(vals)
+    if (kinds == _OTHER).any():
+        return None
+    num = np.flatnonzero((kinds == _FLOAT) | (kinds == _INT) | (kinds == _BOOL))   # bool counts as a number, as in parse_time
+    if len(num):
+        _fill_serial(out, num, vals[num].astype(np.float64))
+    sidx = np.flatnonzero(kinds == _STR)
+    if len(sidx):
+        st = pd.Series(vals[sidx]).str.strip()
+        iso = st.str.fullmatch(_ISO_TIME).to_numpy(dtype=bool)
+        if iso.any():
+            out[sidx[iso]] = pd.to_datetime(st[iso], format="ISO8601", errors="coerce").to_numpy(dtype="datetime64[ns]")
+        rest = np.flatnonzero(~iso & (st != "").to_numpy(dtype=bool))
+        if len(rest):            # other text formats: the scalar rules, once per distinct text
+            codes, uniques = pd.factorize(st.to_numpy(dtype=object)[rest])
+            values = np.empty(len(uniques), dtype=np.int64)
+            for i, u in enumerate(uniques):
+                try:
+                    ts = pd.Timestamp(pd.to_datetime(u))
+                except (ValueError, TypeError, OverflowError):
+                    ts = pd.NaT
+                if ts is not pd.NaT and ts.tzinfo is not None:
+                    return None
+                values[i] = ts.value
+            out.view(np.int64)[sidx[rest]] = values[codes]
+    return out
+
+
+def parse_time_series(s: pd.Series) -> pd.Series:
+    """parse_time over a column, as datetime64[ns] (NaT for blank or unreadable values)."""
+    if s.dtype.kind == "M" and getattr(s.dtype, "tz", None) is None:
+        return s.astype("datetime64[ns]")
+    fast = _parse_time_fast(s)
+    if fast is None:
+        return pd.to_datetime(s.map(parse_time))
+    return pd.Series(fast, index=s.index)
+
+
+def norm_phone_series(s: pd.Series, digits: int = 10, min_digits: int = 10) -> pd.Series:
+    """norm_phone over a column: the last `digits` digits as text, or "" when shorter than `min_digits`."""
+    vals = s.to_numpy(dtype=object)
+    kinds = _kinds(vals)
+    res = np.full(len(vals), "", dtype=object)
+    cand_idx, cand_txt, scalar_idx = [], [], []
+    m = np.flatnonzero(kinds == _STR)
+    if len(m):
+        cand_idx.append(m)
+        cand_txt.append(vals[m])
+    m = np.flatnonzero(kinds == _INT)
+    if len(m):
+        try:
+            txt = np.array([int(v) for v in vals[m]], dtype=np.int64).astype(str).astype(object)
+            cand_idx.append(m)
+            cand_txt.append(txt)
+        except OverflowError:
+            scalar_idx.extend(m)
+    m = np.flatnonzero(kinds == _FLOAT)
+    if len(m):
+        x = vals[m].astype(np.float64)       # NaN stays blank, as in norm_phone
+        whole = np.isfinite(x) & (x == np.floor(x)) & (np.abs(x) < 9e18)
+        if whole.any():
+            cand_idx.append(m[whole])
+            cand_txt.append(x[whole].astype(np.int64).astype(str).astype(object))
+        scalar_idx.extend(m[~whole & ~np.isnan(x)])   # fractions, infinities
+    scalar_idx.extend(np.flatnonzero((kinds == _BOOL) | (kinds == _OTHER)))
+    if cand_idx:
+        idx, txt = np.concatenate(cand_idx), pd.Series(np.concatenate(cand_txt))
+        d = txt.str.replace(r"[^0-9]", "", regex=True)
+        enough = (d.str.len() >= min_digits).to_numpy(dtype=bool)
+        res[idx] = np.where(enough, d.str[-digits:].to_numpy(dtype=object), "")
+    for i in scalar_idx:
+        res[i] = norm_phone(vals[i], digits, min_digits)
+    return pd.Series(res, index=s.index, dtype=object)
+
+
+def clean_text_series(s: pd.Series) -> pd.Series:
+    """clean_text over a column: text with blanks and NaN as "" and surrounding spaces removed."""
+    vals = s.to_numpy(dtype=object)
+    kinds = _kinds(vals)
+    res = np.full(len(vals), "", dtype=object)
+    m = np.flatnonzero(kinds == _STR)
+    if len(m):
+        res[m] = pd.Series(vals[m]).str.strip().to_numpy(dtype=object)
+    for i in np.flatnonzero((kinds != _STR) & (kinds != _NONE)):
+        res[i] = clean_text(vals[i])
+    return pd.Series(res, index=s.index, dtype=object)
+
+
+def parse_number_series(s: pd.Series) -> pd.Series:
+    """parse_number over a column, as float64 (NaN for blank or unreadable values)."""
+    if s.dtype.kind in "fiub":
+        return pd.Series(s.to_numpy(dtype=np.float64), index=s.index)
+    vals = s.to_numpy(dtype=object)
+    kinds = _kinds(vals)
+    res = np.full(len(vals), np.nan)
+    m = np.flatnonzero((kinds == _FLOAT) | (kinds == _INT) | (kinds == _BOOL))
+    if len(m):
+        res[m] = vals[m].astype(np.float64)
+    sidx = np.flatnonzero(kinds == _STR)
+    if len(sidx):
+        st = pd.Series(vals[sidx]).str.replace(r"[$,\s]", "", regex=True)
+        plain = st.str.fullmatch(_PLAIN_NUMBER).to_numpy(dtype=bool)
+        if plain.any():
+            res[sidx[plain]] = st[plain].to_numpy(dtype=object).astype(np.float64)
+        for i in sidx[~plain]:
+            res[i] = parse_number(vals[i])
+    for i in np.flatnonzero(kinds == _OTHER):
+        res[i] = parse_number(vals[i])
+    return pd.Series(res, index=s.index)
+
+
+def parse_bool_series(s: pd.Series) -> pd.Series:
+    """parse_bool over a column: real booleans as they are, text "TRUE" in any case; everything else False."""
+    if s.dtype.kind == "b":
+        return pd.Series(s.to_numpy(dtype=bool), index=s.index)
+    vals = s.to_numpy(dtype=object)
+    kinds = _kinds(vals)
+    res = np.zeros(len(vals), dtype=bool)
+    m = np.flatnonzero(kinds == _BOOL)
+    if len(m):
+        res[m] = vals[m].astype(bool)
+    m = np.flatnonzero(kinds == _STR)
+    if len(m):
+        res[m] = (pd.Series(vals[m]).str.strip().str.upper() == "TRUE").to_numpy(dtype=bool)
+    for i in np.flatnonzero(kinds == _OTHER):
+        res[i] = parse_bool(vals[i])
+    return pd.Series(res, index=s.index)
+
+
 # ---------- paid leads ----------
 
 def prepare_ringba(df: pd.DataFrame, cfg: dict) -> pd.DataFrame:
     c, p = cfg["sources"]["ringba"]["columns"], cfg["phone"]
     out = pd.DataFrame({
         "_row": df["_row"].values,
-        "call_id": df[c["call_id"]].map(clean_text).values,
-        "call_time": df[c["call_time"]].map(parse_time).values,
-        "phone": df[c["phone"]].map(lambda v: norm_phone(v, p["digits"], p["min_digits"])).values,
-        "payout": df[c["payout"]].map(parse_number).values,
-        "connected": df[c["connected"]].map(parse_bool).values,
-        "converted": df[c["converted"]].map(parse_bool).values,
+        "call_id": clean_text_series(df[c["call_id"]]).values,
+        "call_time": parse_time_series(df[c["call_time"]]).values,
+        "phone": norm_phone_series(df[c["phone"]], p["digits"], p["min_digits"]).values,
+        "payout": parse_number_series(df[c["payout"]]).values,
+        "connected": parse_bool_series(df[c["connected"]]).values,
+        "converted": parse_bool_series(df[c["converted"]]).values,
     })
     out["call_time"] = pd.to_datetime(out["call_time"])
     return out
@@ -123,13 +287,13 @@ def select_paid_leads(ringba: pd.DataFrame, cfg: dict) -> tuple[pd.DataFrame, di
 def prepare_ringcx(df: pd.DataFrame, cfg: dict) -> pd.DataFrame:
     c, p = cfg["sources"]["ringcx"]["columns"], cfg["phone"]
     aliases = {k.upper().strip(): v.upper().strip() for k, v in cfg["agent_match"]["aliases"].items()}
-    agent = df[c["agent"]].map(clean_text).str.upper()
+    agent = clean_text_series(df[c["agent"]]).str.upper()
     out = pd.DataFrame({
         "_row": df["_row"].values,
-        "date": pd.to_datetime(df[c["date"]].map(parse_time)).dt.normalize().values,
-        "result": df[c["result"]].map(clean_text).values,
+        "date": parse_time_series(df[c["date"]]).dt.normalize().values,
+        "result": clean_text_series(df[c["result"]]).values,
         "agent": agent.replace(aliases).values,
-        "phone": df[c["phone"]].map(lambda v: norm_phone(v, p["digits"], p["min_digits"])).values,
+        "phone": norm_phone_series(df[c["phone"]], p["digits"], p["min_digits"]).values,
     })
     return out
 
@@ -159,14 +323,14 @@ def prepare_lenders(tables: dict[str, pd.DataFrame], cfg: dict) -> pd.DataFrame:
         df, c = tables[key], cfg["sources"][key]["columns"]
         base = pd.DataFrame({
             "_row": df["_row"].values,
-            "status": df[c["status"]].map(clean_text).values,
-            "close_date": pd.to_datetime(df[c["close_date"]].map(parse_time)).values,
-            "debt": (df[c["debt"]].map(parse_number).values if c["debt"] else np.nan),
-            "agent": df[c["agent"]].map(clean_text).values,
+            "status": clean_text_series(df[c["status"]]).values,
+            "close_date": parse_time_series(df[c["close_date"]]).values,
+            "debt": (parse_number_series(df[c["debt"]]).values if c["debt"] else np.nan),
+            "agent": clean_text_series(df[c["agent"]]).values,
         })
         seen = None
         for col in c["phones"]:
-            ph = df[col].map(lambda v: norm_phone(v, p["digits"], p["min_digits"])).values
+            ph = norm_phone_series(df[col], p["digits"], p["min_digits"]).values
             part = base.assign(phone=ph)
             if seen is not None:
                 part = part[part["phone"] != seen]
@@ -174,8 +338,11 @@ def prepare_lenders(tables: dict[str, pd.DataFrame], cfg: dict) -> pd.DataFrame:
             seen = ph if seen is None else seen
     crm = pd.concat(frames, ignore_index=True)
     crm = crm[crm["phone"] != ""].copy()
-    closed = {k: set(v) for k, v in le["closed_statuses"].items()}
-    crm["is_closed"] = [s in closed[k] for k, s in zip(crm["lender"], crm["status"])]
+    is_closed = np.zeros(len(crm), dtype=bool)
+    for k in le["order"]:
+        m = (crm["lender"] == k).to_numpy()
+        is_closed[m] = crm.loc[m, "status"].isin(set(le["closed_statuses"][k])).to_numpy()
+    crm["is_closed"] = is_closed
     crm["is_active"] = crm["is_closed"] & ~crm["status"].isin(set(le["inactive_statuses"]))
     crm["close_date"] = pd.to_datetime(crm["close_date"])
     return crm
@@ -186,7 +353,7 @@ def unknown_statuses(tables: dict[str, pd.DataFrame], cfg: dict) -> dict[str, li
     le, out = cfg["lenders"], {}
     for key in le["order"]:
         col = cfg["sources"][key]["columns"]["status"]
-        seen = set(tables[key][col].map(clean_text))
+        seen = set(clean_text_series(tables[key][col]))
         known = set(le["closed_statuses"][key]) | set(le["known_non_closing_statuses"][key])
         extra = sorted(seen - known)
         if extra:
@@ -199,7 +366,7 @@ def closed_status_rows(tables: dict[str, pd.DataFrame], cfg: dict) -> dict[str, 
     out = {}
     for key in cfg["lenders"]["order"]:
         col = cfg["sources"][key]["columns"]["status"]
-        out[key] = int(tables[key][col].map(clean_text).isin(set(cfg["lenders"]["closed_statuses"][key])).sum())
+        out[key] = int(clean_text_series(tables[key][col]).isin(set(cfg["lenders"]["closed_statuses"][key])).sum())
     return out
 
 
