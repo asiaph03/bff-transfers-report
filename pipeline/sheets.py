@@ -58,69 +58,144 @@ def header_index(header: list, wanted: list[str], where: str) -> dict[str, int]:
 
 
 class GoogleSheetsSource:
-    """Authenticates with a short-lived access token (keyless, from GitHub's OIDC sign-in to Google).
+    """Reads Google Sheets with refreshable, keyless, read-only credentials.
 
-    GOOGLE_ACCESS_TOKEN: a read-only (spreadsheets.readonly) token minted for the service account by
-    google-github-actions/auth through Workload Identity Federation. No key file exists.
+    In GitHub Actions, google-github-actions/auth writes a Workload Identity Federation credentials file
+    (no private key) and points GOOGLE_APPLICATION_CREDENTIALS at it. google-auth loads it here and
+    refreshes the access token whenever it expires or Google answers 401, so a long run never reuses an
+    expired token. Only the spreadsheets.readonly scope is requested.
+
+    Every request is logged with its attempt number, HTTP status and duration. Google's own error status
+    and message are logged with long digit runs masked; tokens and cell values are never logged.
     """
 
-    def __init__(self, access_token: str | None = None):
-        import requests
+    RETRYABLE = frozenset({429, 500, 502, 503, 504})
+    QUOTA_REASONS = frozenset({"rateLimitExceeded", "userRateLimitExceeded", "RATE_LIMIT_EXCEEDED"})
+    TIMEOUT = (15, 240)            # connect, read (s). Google gives up on its side at about 180 s.
+    BACKOFF_BASE = 10.0            # first retry waits about 5-10 s, doubling each time
+    BACKOFF_CAP = 120.0
+    MAX_ATTEMPTS = 6               # per request
+    SOURCE_BUDGET = 20 * 60        # per source (s): stop retrying one sheet after this
+    JOB_BUDGET = 40 * 60           # all sources together (s)
 
-        token = access_token if access_token is not None else os.environ.get("GOOGLE_ACCESS_TOKEN", "")
-        if not token.strip():
-            raise SourceError("GOOGLE_ACCESS_TOKEN is not set: the Google sign-in step did not run or failed")
-        self.session = requests.Session()
-        self.session.headers["Authorization"] = "Bearer " + token.strip()
-        self.account = os.environ.get("GOOGLE_SERVICE_ACCOUNT", "the dashboard service account")
-
-    # Google can take minutes to answer for large, formula-heavy sheets.
-    TIMEOUT = (30, 300)          # connect, read (seconds)
-    RETRY_WAITS = (15, 45, 90, 180)   # waits before attempts 2 to 5
-
-    def _get(self, url: str, params: dict, where: str = "Google Sheets") -> dict:
+    def __init__(self, credentials=None, session=None, clock=None, sleep=None, rand=None):
+        import random
         import time
 
-        import requests
+        self.clock = clock or time.monotonic
+        self.sleep = sleep or time.sleep
+        self.rand = rand or random.random
+        self.account = os.environ.get("GOOGLE_SERVICE_ACCOUNT", "the dashboard service account")
+        if session is not None:
+            self.session = session
+        else:
+            from google.auth.transport.requests import AuthorizedSession
 
-        r = None
-        for attempt, wait in enumerate((0,) + self.RETRY_WAITS, start=1):
-            if wait:
-                print(f"  {where}: retrying in {wait}s (attempt {attempt})", flush=True)
-                time.sleep(wait)
+            if credentials is None:
+                import google.auth
+                from google.auth.exceptions import DefaultCredentialsError
+
+                try:
+                    credentials, _ = google.auth.default(scopes=[READONLY_SCOPE])
+                except DefaultCredentialsError as e:
+                    raise SourceError("Google credentials not found: the keyless sign-in step did not run or failed") from e
+            # AuthorizedSession refreshes before a request when the token has expired, and once more
+            # if Google answers 401; it never sends the token anywhere but Google.
+            self.session = AuthorizedSession(credentials, max_refresh_attempts=1)
+        self.job_deadline = self.clock() + self.JOB_BUDGET
+        self.source_deadline = self.job_deadline
+
+    def start_source(self) -> None:
+        """Begin the time budget for the next source (bounded by the job budget)."""
+        self.source_deadline = min(self.clock() + self.SOURCE_BUDGET, self.job_deadline)
+
+    @staticmethod
+    def _google_error(r) -> tuple[str, str]:
+        try:
+            err = r.json().get("error", {})
+        except ValueError:
+            return "", ""
+        reasons = [d.get("reason", "") for d in err.get("errors", []) if isinstance(d, dict)]
+        reasons += [d.get("reason", "") for d in err.get("details", []) if isinstance(d, dict)]
+        msg = re.sub(r"\d{5,}", "#", str(err.get("message", "")))[:120]
+        return str(err.get("status", "")), (msg + (f" [{', '.join(x for x in reasons if x)}]" if any(reasons) else ""))
+
+    def _wait_before(self, attempt: int, retry_after: str | None) -> float:
+        wait = min(self.BACKOFF_CAP, self.BACKOFF_BASE * 2 ** (attempt - 2)) * (0.5 + self.rand() / 2)
+        if retry_after:
+            try:
+                wait = max(wait, min(float(retry_after), self.BACKOFF_CAP))
+            except ValueError:
+                pass
+        return wait
+
+    def _get(self, url: str, params: dict, where: str = "Google Sheets") -> dict:
+        import requests
+        from google.auth.exceptions import RefreshError, TransportError
+
+        last = "no attempt"
+        retry_after = None
+        for attempt in range(1, self.MAX_ATTEMPTS + 1):
+            if attempt > 1:
+                wait = self._wait_before(attempt, retry_after)
+                # Do not start an attempt that cannot finish inside the budget.
+                if self.clock() + wait + self.TIMEOUT[1] > self.source_deadline:
+                    raise SourceError(f"{where}: Google Sheets still unavailable when the time budget ran out "
+                                      f"after {attempt - 1} attempt(s); last: {last}")
+                print(f"  {where}: retrying in {wait:.0f}s", flush=True)
+                self.sleep(wait)
+            t0 = self.clock()
+            retry_after = None
             try:
                 r = self.session.get(url, params=params, timeout=self.TIMEOUT)
-            except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
-                print(f"  {where}: no answer ({type(e).__name__})", flush=True)
-                r = None
+            except RefreshError as e:
+                raise SourceError(f"{where}: Google sign-in could not be refreshed ({type(e).__name__}); check the keyless sign-in setup") from None
+            except (requests.exceptions.Timeout, requests.exceptions.ConnectionError,
+                    requests.exceptions.ChunkedEncodingError, TransportError) as e:
+                last = f"no answer ({type(e).__name__}) after {self.clock() - t0:.0f}s"
+                print(f"  {where}: attempt {attempt}: {last}", flush=True)
                 continue
-            if r.status_code == 429 or r.status_code >= 500:
-                print(f"  {where}: Google returned {r.status_code}", flush=True)
+            dur = self.clock() - t0
+            status, detail = ("", "") if r.status_code < 400 else self._google_error(r)
+            print(f"  {where}: attempt {attempt}: HTTP {r.status_code} in {dur:.1f}s" + (f" ({status}: {detail})" if status or detail else ""), flush=True)
+            last = f"HTTP {r.status_code} {status}".strip()
+            quota = r.status_code == 403 and any(q in detail for q in self.QUOTA_REASONS)
+            if r.status_code in self.RETRYABLE or quota:
+                retry_after = r.headers.get("Retry-After")
                 continue
-            break
-        if r is None:
-            raise SourceError(f"{where}: Google Sheets did not answer after {1 + len(self.RETRY_WAITS)} attempts")
-        if r.status_code == 401:
-            raise SourceError(f"{where}: Google sign-in expired or was refused (401); the run took longer than the token lifetime or the sign-in failed")
-        if r.status_code == 403:
-            raise SourceError(f"{where}: permission denied: share the spreadsheet with {self.account} as Viewer")
-        if r.status_code == 404:
-            raise SourceError(f"{where}: spreadsheet or worksheet not found")
-        if r.status_code >= 400:
-            raise SourceError(f"{where}: Google Sheets API error {r.status_code}")
-        return r.json()
+            if r.status_code == 401:
+                raise SourceError(f"{where}: Google refused the sign-in (401) even after refreshing it; check the keyless sign-in setup")
+            if r.status_code == 403:
+                raise SourceError(f"{where}: permission denied: share the spreadsheet with {self.account} as Viewer")
+            if r.status_code == 404:
+                raise SourceError(f"{where}: spreadsheet or worksheet not found")
+            if r.status_code >= 400:
+                raise SourceError(f"{where}: Google Sheets API error {r.status_code} {status}".strip())
+            try:
+                return r.json()
+            except ValueError:
+                last = "HTTP 200 with an unreadable body"
+                print(f"  {where}: attempt {attempt}: {last}", flush=True)
+                continue
+        raise SourceError(f"{where}: Google Sheets still unavailable after {self.MAX_ATTEMPTS} attempts; last: {last}")
 
     def read(self, spreadsheet_id: str, worksheet: str, columns: list[str], whole_tab: bool = False) -> pd.DataFrame:
         where = f"{worksheet}"
         if whole_tab:
-            # One request for header and rows: for small tabs on slow spreadsheets.
+            # One request for header and rows, in sheet order: for small tabs on slow spreadsheets,
+            # where each request costs minutes no matter how small its range is.
             body = self._get(f"{API}/{spreadsheet_id}/values/{_q(worksheet)}",
-                             {"valueRenderOption": "UNFORMATTED_VALUE", "dateTimeRenderOption": "SERIAL_NUMBER"}, where)
-            rows = body.get("values") or [[]]
+                             {"valueRenderOption": "UNFORMATTED_VALUE", "dateTimeRenderOption": "SERIAL_NUMBER",
+                              "majorDimension": "ROWS"}, where)
+            if not str(body.get("range", "")).startswith(_q(worksheet) + "!") and not str(body.get("range", "")).startswith(worksheet + "!"):
+                raise SourceError(f"{where}: Google returned a different range than requested; not using it")
+            rows = body.get("values")
+            if not rows:
+                raise SourceError(f"{where}: Google returned no header row; the tab is empty or the read was incomplete")
             idx = header_index(rows[0], columns, where)
             data_rows = rows[1:]
             data = {name: [(r[i] if i < len(r) else None) for r in data_rows] for name, i in idx.items()}
-            df = pd.DataFrame(data)
+            df = pd.DataFrame(data, columns=list(idx.keys()))
             df["_row"] = range(2, len(data_rows) + 2)
             return df
         head = self._get(f"{API}/{spreadsheet_id}/values/{_q(worksheet)}!1:1", {"valueRenderOption": "UNFORMATTED_VALUE"}, where)
@@ -132,10 +207,13 @@ class GoogleSheetsSource:
             {"ranges": ranges, "majorDimension": "COLUMNS", "valueRenderOption": "UNFORMATTED_VALUE", "dateTimeRenderOption": "SERIAL_NUMBER"},
             where,
         )
-        cols = [((vr.get("values") or [[]])[0]) for vr in body.get("valueRanges", [])]
+        vrs = body.get("valueRanges")
+        if not isinstance(vrs, list) or len(vrs) != len(ranges):
+            raise SourceError(f"{where}: Google returned {0 if not isinstance(vrs, list) else len(vrs)} of {len(ranges)} requested columns; not using a partial read")
+        cols = [((vr.get("values") or [[]])[0]) for vr in vrs]
         n = max((len(c) for c in cols), default=0)
         data = {name: (c + [None] * (n - len(c))) for name, c in zip(idx.keys(), cols)}
-        df = pd.DataFrame(data)
+        df = pd.DataFrame(data, columns=list(idx.keys()))
         df["_row"] = range(2, n + 2)
         return df
 
@@ -200,6 +278,8 @@ def read_all(cfg: dict, source) -> tuple[dict[str, pd.DataFrame], dict[str, int]
                 continue
             cols.extend(v if isinstance(v, list) else [v])
         print(f"reading {key} / {s['worksheet']} ({len(cols)} columns)", flush=True)
+        if hasattr(source, "start_source"):
+            source.start_source()
         if isinstance(source, LocalSource):
             tables[key] = source.read_key(key, s["worksheet"], cols)
         else:

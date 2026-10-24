@@ -252,24 +252,6 @@ def test_failed_source_retrieval(cfg, tmp_path):
         read_all(cfg, src)
 
 
-def test_google_source_retries_then_reports_timeout(monkeypatch):
-    import requests
-    from pipeline import sheets
-
-    src = sheets.GoogleSheetsSource(access_token="test-token")
-    monkeypatch.setattr(sheets.GoogleSheetsSource, "RETRY_WAITS", (0, 0))
-    calls = {"n": 0}
-
-    def boom(*a, **k):
-        calls["n"] += 1
-        raise requests.exceptions.ReadTimeout("slow")
-
-    monkeypatch.setattr(src.session, "get", boom)
-    with pytest.raises(SourceError, match="did not answer after 3 attempts"):
-        src._get("https://example.invalid", {}, "Ringba2")
-    assert calls["n"] == 3
-
-
 def test_unexpected_error_still_writes_report(tmp_path, monkeypatch):
     from pipeline import build
 
@@ -287,35 +269,246 @@ def test_serial_time_rounds_float_error_to_the_second():
     assert rules.parse_time(serial).strftime("%Y-%m-%dT%H:%M:%S") == "2026-10-19T16:33:48"
 
 
-class _Resp:
-    def __init__(self, status, body=None):
-        self.status_code, self._body = status, body or {}
+# ---- Google Sheets reads: mocked HTTP only (no network, no real data) ----
+import datetime as _dt  # noqa: E402
+
+import requests  # noqa: E402
+
+from pipeline import sheets  # noqa: E402
+
+TAB = "Two Minute Transfers"
+RCX_HEADER = ["Date", "Call Result", "Agent Full Name", "ANI", "Unused"]
+
+
+class FakeClock:
+    def __init__(self):
+        self.t = 0.0
+        self.slept = []
+
+    def now(self):
+        return self.t
+
+    def sleep(self, s):
+        self.slept.append(s)
+        self.t += s
+
+
+class Resp:
+    def __init__(self, status=200, body=None, headers=None, bad_json=False):
+        self.status_code, self._body, self.headers, self._bad = status, body if body is not None else {}, headers or {}, bad_json
 
     def json(self):
+        if self._bad:
+            raise ValueError("truncated")
         return self._body
 
 
-def test_google_source_whole_tab_reads_header_and_rows_in_one_request(monkeypatch):
-    from pipeline import sheets
+class ScriptedSession:
+    """Plays back responses (or raises exceptions) in order; records each call."""
 
-    src = sheets.GoogleSheetsSource(access_token="test-token")
-    urls = []
-    body = {"values": [["Date", "Other", "ANI"], [46300.5, "x", "5550100001"], [46301.25]]}
+    def __init__(self, script, clock=None, took=0.0):
+        self.script, self.calls, self.clock, self.took = list(script), [], clock, took
 
-    def get(url, params=None, timeout=None):
-        urls.append(url)
-        return _Resp(200, body)
+    def get(self, url, params=None, timeout=None):
+        self.calls.append((url, params, timeout))
+        if self.clock:
+            self.clock.t += self.took
+        item = self.script.pop(0)
+        if isinstance(item, Exception):
+            raise item
+        return item
 
-    monkeypatch.setattr(src.session, "get", get)
-    df = src.read("sheet-id", "Two Minute Transfers", ["Date", "ANI"], whole_tab=True)
-    assert len(urls) == 1 and "!" not in urls[0]
-    assert list(df["ANI"]) == ["5550100001", None] and list(df["_row"]) == [2, 3]
+
+def unavailable():
+    return Resp(503, {"error": {"code": 503, "status": "UNAVAILABLE", "message": "The service is currently unavailable."}})
 
 
-def test_google_source_401_names_expired_sign_in(monkeypatch):
-    from pipeline import sheets
+def rcx_body(rows):
+    return {"range": f"'{TAB}'!A1:E{len(rows) + 1}", "majorDimension": "ROWS", "values": [RCX_HEADER] + rows}
 
-    src = sheets.GoogleSheetsSource(access_token="test-token")
-    monkeypatch.setattr(src.session, "get", lambda *a, **k: _Resp(401))
-    with pytest.raises(SourceError, match="sign-in expired"):
-        src._get("https://example.invalid", {}, "Two Minute Transfers")
+
+def make_source(script, took=0.0):
+    clk = FakeClock()
+    sess = ScriptedSession(script, clk, took)
+    src = sheets.GoogleSheetsSource(session=sess, clock=clk.now, sleep=clk.sleep, rand=lambda: 0.5)
+    src.start_source()
+    return src, sess, clk
+
+
+RCX_ROWS = [[46153.0, "Inbound Accepted", "First Agent", "1" + fake_phone(1), "x"],
+            [46153.0, "Inbound Accepted", "Second Agent", "1" + fake_phone(1)]]   # short row: trailing cells omitted
+
+
+def test_503_then_success_reads_the_whole_tab_in_one_request():
+    src, sess, clk = make_source([unavailable(), Resp(200, rcx_body(RCX_ROWS))])
+    df = src.read("sheet-id", TAB, ["Date", "Call Result", "Agent Full Name", "ANI"], whole_tab=True)
+    assert len(sess.calls) == 2 and all("!" not in c[0] for c in sess.calls)   # whole tab, no range split
+    assert len(clk.slept) == 1 and list(df["_row"]) == [2, 3]
+    assert sess.calls[0][2] == sheets.GoogleSheetsSource.TIMEOUT
+
+
+def test_several_transient_errors_then_success_with_growing_jittered_waits():
+    script = [Resp(429, headers={"Retry-After": "30"}), Resp(500), Resp(502), Resp(504), Resp(200, rcx_body(RCX_ROWS))]
+    src, sess, clk = make_source(script)
+    src.read("sheet-id", TAB, ["Date", "ANI"], whole_tab=True)
+    assert len(sess.calls) == 5
+    assert clk.slept[0] >= 30                       # Retry-After respected
+    assert clk.slept[1] < clk.slept[2] < clk.slept[3] <= sheets.GoogleSheetsSource.BACKOFF_CAP
+
+
+def test_quota_403_is_retried_but_permission_403_is_not():
+    quota = Resp(403, {"error": {"code": 403, "status": "PERMISSION_DENIED", "message": "Quota exceeded",
+                                 "errors": [{"reason": "rateLimitExceeded"}]}})
+    src, sess, _ = make_source([quota, Resp(200, rcx_body(RCX_ROWS))])
+    src.read("sheet-id", TAB, ["ANI"], whole_tab=True)
+    assert len(sess.calls) == 2
+    denied = Resp(403, {"error": {"code": 403, "status": "PERMISSION_DENIED", "message": "The caller does not have permission"}})
+    src, sess, _ = make_source([denied, Resp(200, rcx_body(RCX_ROWS))])
+    with pytest.raises(SourceError, match="permission denied"):
+        src.read("sheet-id", TAB, ["ANI"], whole_tab=True)
+    assert len(sess.calls) == 1
+
+
+def test_persistent_503_stops_at_the_source_time_budget():
+    # each 503 takes 185 s, as observed in the GitHub runs
+    src, sess, clk = make_source([unavailable() for _ in range(10)], took=185)
+    with pytest.raises(SourceError, match="time budget ran out.*HTTP 503 UNAVAILABLE"):
+        src.read("sheet-id", TAB, ["ANI"], whole_tab=True)
+    assert clk.t <= sheets.GoogleSheetsSource.SOURCE_BUDGET
+    assert 1 < len(sess.calls) < sheets.GoogleSheetsSource.MAX_ATTEMPTS
+
+
+def test_persistent_503_stops_at_max_attempts_when_errors_are_fast():
+    src, sess, _ = make_source([unavailable() for _ in range(10)])
+    with pytest.raises(SourceError, match="still unavailable after 6 attempts"):
+        src.read("sheet-id", TAB, ["ANI"], whole_tab=True)
+    assert len(sess.calls) == 6
+
+
+def test_request_timeout_is_retried_then_succeeds():
+    src, sess, _ = make_source([requests.exceptions.ReadTimeout("slow"), requests.exceptions.ConnectionError("reset"),
+                                Resp(200, rcx_body(RCX_ROWS))])
+    df = src.read("sheet-id", TAB, ["ANI"], whole_tab=True)
+    assert len(sess.calls) == 3 and len(df) == 2
+
+
+@pytest.mark.parametrize("status,msg", [(401, "refused the sign-in"), (404, "not found"), (400, "API error 400")])
+def test_permanent_errors_fail_at_once(status, msg):
+    src, sess, _ = make_source([Resp(status), Resp(200, rcx_body(RCX_ROWS))])
+    with pytest.raises(SourceError, match=msg):
+        src.read("sheet-id", TAB, ["ANI"], whole_tab=True)
+    assert len(sess.calls) == 1
+
+
+def test_empty_tab_is_valid_but_a_missing_or_partial_response_is_not():
+    src, _, _ = make_source([Resp(200, rcx_body([]))])
+    assert len(src.read("sheet-id", TAB, ["ANI"], whole_tab=True)) == 0        # header only: zero rows, read succeeded
+    src, _, _ = make_source([Resp(200, {"range": f"'{TAB}'!A1:Z1000"})])
+    with pytest.raises(SourceError, match="no header row"):
+        src.read("sheet-id", TAB, ["ANI"], whole_tab=True)
+    src, _, _ = make_source([Resp(200, {"range": "'Other'!A1:E3", "values": [RCX_HEADER]})])
+    with pytest.raises(SourceError, match="different range"):
+        src.read("sheet-id", TAB, ["ANI"], whole_tab=True)
+    src, _, _ = make_source([Resp(200, bad_json=True), Resp(200, rcx_body(RCX_ROWS))])   # unreadable body is retried
+    assert len(src.read("sheet-id", TAB, ["ANI"], whole_tab=True)) == 2
+    header = Resp(200, {"values": [["Date", "ANI"]]})
+    partial = Resp(200, {"valueRanges": [{"values": [[1, 2]]}]})                         # 1 of 2 columns
+    src, _, _ = make_source([header, partial])
+    with pytest.raises(SourceError, match="1 of 2 requested columns"):
+        src.read("sheet-id", "Ringba2", ["Date", "ANI"])
+
+
+def test_ringcx_row_order_is_kept_for_the_agent_tie_break(cfg):
+    src, _, _ = make_source([Resp(200, rcx_body(RCX_ROWS))])
+    df = src.read("sheet-id", TAB, ["Date", "Call Result", "Agent Full Name", "ANI"], whole_tab=True)
+    assert list(df["Agent Full Name"]) == ["First Agent", "Second Agent"] and list(df["_row"]) == [2, 3]
+    L = leads_from(cfg, [("a", _dt.datetime(2026, 5, 10, 9), fake_phone(1), 32), ("b", "2026-05-11 10:00", fake_phone(2), 32),
+                         ("c", "2026-05-12 10:00", fake_phone(3), 32)])[0]
+    out = rules.match_agents(L, rules.prepare_ringcx(df, cfg), cfg).set_index("phone")
+    assert out.loc[fake_phone(1), "agent"] == "First Agent"      # same day: first row in sheet order wins
+
+
+class _FakeCreds:
+    """google-auth Credentials stand-in: counts refreshes, can start expired."""
+
+    def __new__(cls, *a, **k):
+        from google.auth import credentials as gc
+
+        class C(gc.Credentials):
+            def __init__(self, expired_first):
+                super().__init__()
+                self.refreshes = 0
+                self.token = "old-token" if not expired_first else None
+                self.expiry = (_dt.datetime.utcnow() - _dt.timedelta(minutes=1)) if expired_first else None
+
+            def refresh(self, request):
+                self.refreshes += 1
+                self.token = f"token-{self.refreshes}"
+                self.expiry = _dt.datetime.utcnow() + _dt.timedelta(hours=1)
+
+        return C(*a, **k)
+
+
+class _Adapter(requests.adapters.HTTPAdapter):
+    """Answers like Google: 401 for 'old-token', then the scripted responses; records Authorization headers."""
+
+    def __init__(self, script):
+        super().__init__()
+        self.script, self.auth = list(script), []
+
+    def send(self, request, **kw):
+        self.auth.append(request.headers.get("authorization"))
+        status, body = (401, {"error": {"code": 401, "status": "UNAUTHENTICATED"}}) if request.headers.get("authorization") == "Bearer old-token" else self.script.pop(0)
+        r = requests.models.Response()
+        r.status_code, r._content, r.request, r.url = status, __import__("json").dumps(body).encode(), request, request.url
+        r.headers["Content-Type"] = "application/json"
+        return r
+
+
+def _authorized_source(creds, adapter):
+    from google.auth.transport.requests import AuthorizedSession
+
+    clk = FakeClock()
+    sess = AuthorizedSession(creds, max_refresh_attempts=1)
+    sess.mount("https://", adapter)
+    src = sheets.GoogleSheetsSource(session=sess, clock=clk.now, sleep=clk.sleep, rand=lambda: 0.5)
+    src.start_source()
+    return src
+
+
+def test_expired_token_is_refreshed_before_the_request():
+    creds, ad = _FakeCreds(True), _Adapter([(200, rcx_body(RCX_ROWS))])
+    df = _authorized_source(creds, ad).read("sheet-id", TAB, ["ANI"], whole_tab=True)
+    assert creds.refreshes == 1 and ad.auth == ["Bearer token-1"] and len(df) == 2
+
+
+def test_token_rejected_mid_run_is_refreshed_and_the_read_retried():
+    creds, ad = _FakeCreds(False), _Adapter([(200, rcx_body(RCX_ROWS))])
+    df = _authorized_source(creds, ad).read("sheet-id", TAB, ["ANI"], whole_tab=True)
+    assert creds.refreshes == 1 and ad.auth == ["Bearer old-token", "Bearer token-1"] and len(df) == 2
+
+
+def test_401_after_a_refresh_is_permanent():
+    creds, ad = _FakeCreds(True), _Adapter([(401, {"error": {"code": 401}}), (401, {"error": {"code": 401}}), (200, {})])
+    with pytest.raises(SourceError, match="refused the sign-in"):
+        _authorized_source(creds, ad).read("sheet-id", TAB, ["ANI"], whole_tab=True)
+
+
+def test_missing_credentials_give_a_clear_error(monkeypatch):
+    import google.auth
+    from google.auth.exceptions import DefaultCredentialsError
+
+    def none(*a, **k):
+        raise DefaultCredentialsError("none")
+
+    monkeypatch.setattr(google.auth, "default", none)
+    with pytest.raises(SourceError, match="credentials not found"):
+        sheets.GoogleSheetsSource()
+
+
+def test_error_log_masks_long_numbers_and_never_prints_tokens(capsys):
+    body = {"error": {"code": 503, "status": "UNAVAILABLE", "message": "row 5550100001 unavailable"}}
+    src, _, _ = make_source([Resp(503, body), Resp(200, rcx_body(RCX_ROWS))])
+    src.read("sheet-id", TAB, ["ANI"], whole_tab=True)
+    out = capsys.readouterr().out
+    assert "5550100001" not in out and "row # unavailable" in out and "Bearer" not in out and "HTTP 503" in out

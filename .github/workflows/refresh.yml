@@ -26,7 +26,7 @@ jobs:
   build:
     name: Test, fetch, calculate and validate
     runs-on: ubuntu-latest
-    timeout-minutes: 55
+    timeout-minutes: 50   # the pipeline stops itself after 40 min of Google reads
     permissions:
       contents: read
       id-token: write   # lets this job sign in to Google without a stored key
@@ -54,14 +54,14 @@ jobs:
         with:
           workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
           service_account: ${{ vars.GCP_SERVICE_ACCOUNT }}
-          token_format: access_token
-          access_token_scopes: https://www.googleapis.com/auth/spreadsheets.readonly
-          access_token_lifetime: 3600s   # Google can be slow on the RingCX sheet; 1 hour is the maximum
-          create_credentials_file: false
+          # Writes a keyless Workload Identity credentials file (no private key, removed when the job
+          # ends) and sets GOOGLE_APPLICATION_CREDENTIALS. The pipeline loads it with google-auth, asks
+          # only for the spreadsheets.readonly scope, and refreshes the token whenever it expires.
+          create_credentials_file: true
+          export_environment_variables: true
 
       - name: Fetch Google Sheets, calculate, validate
         env:
-          GOOGLE_ACCESS_TOKEN: ${{ steps.gauth.outputs.access_token }}
           GOOGLE_SERVICE_ACCOUNT: ${{ vars.GCP_SERVICE_ACCOUNT }}
         run: |
           set -o pipefail
