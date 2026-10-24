@@ -546,8 +546,8 @@ class _Cur:
 class FakeConn:
     """Answers the count query, then the rows query; records SQL, params and connection settings."""
 
-    def __init__(self, rows, count=None, fail_on=None, names=RESULT_COLS):
-        self.rows, self.count, self.fail_on, self.names = rows, count, fail_on, names
+    def __init__(self, rows, count=None, fail_on=None, names=RESULT_COLS, undated=0):
+        self.rows, self.count, self.fail_on, self.names, self.undated = rows, count, fail_on, names, undated
         self.sql, self.params, self.closed, self.read_only, self.isolation_level = [], [], False, None, None
 
     def transaction(self):
@@ -564,7 +564,7 @@ class FakeConn:
         if self.fail_on and self.fail_on in text:
             raise psycopg.errors.QueryCanceled("canceling statement due to statement timeout (host db.example)")
         if text.startswith("SELECT count("):
-            return _Cur([(len(self.rows) if self.count is None else self.count,)], ["count"])
+            return _Cur([(len(self.rows) if self.count is None else self.count, self.undated)], ["count", "undated"])
         return _Cur(self.rows, self.names)
 
     def close(self):
@@ -819,3 +819,15 @@ def test_failed_postgres_read_writes_no_site(tmp_path, monkeypatch):
     text = (tmp_path / "validation.md").read_text()
     assert rc == 1 and not (tmp_path / "site").exists()
     assert "RINGCX_DATABASE_URL is not set" in text and "FAILED" in text
+
+
+def test_pg_undated_rows_outside_the_date_bound_still_fail(cfg, monkeypatch):
+    conn = FakeConn(DB_ROWS, undated=2)                  # two queue rows with no interaction_date
+    src, _ = pg_source(conn, monkeypatch)
+    df = src.read()
+    count_sql = conn.sql[0]
+    assert 'count(*) FILTER (WHERE "interaction_date" IS NULL)' in count_sql and 'WHERE "queue" = %(queue)s' in count_sql
+    assert src.diag["missing_date"] == 2
+    rep = validate.Report()
+    validate.check_pg_quality(rep, src.diag, rules.prepare_ringcx(df, cfg), cfg)
+    assert any("interaction date" in f for f in rep.failures)

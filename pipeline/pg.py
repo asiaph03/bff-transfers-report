@@ -79,7 +79,10 @@ def build_query(pg: dict, sheet_cols: dict):
     picks = [sql.SQL("{} AS {}").format(sql.Identifier(c[f]), sql.Identifier(sheet_cols[f])) for f in FIELDS]
     picks.append(sql.SQL("{} AS {}").format(sql.Identifier(c["call_id"]), sql.Identifier("_call_id")))
     order = sql.SQL(", ").join(sql.Identifier(x) for x in pg["order_by"])
-    count_sql = sql.SQL("SELECT count(*) FROM {t} WHERE {w}").format(t=table, w=where_sql)
+    # Rows with no date never pass the date bound, so they are counted separately (same queue filter).
+    queue_only = sql.SQL("{} = %(queue)s").format(sql.Identifier(c["queue"])) if c.get("queue") else sql.SQL("TRUE")
+    count_sql = sql.SQL("SELECT count(*) FILTER (WHERE {w}), count(*) FILTER (WHERE {d} IS NULL) FROM {t} WHERE {q}").format(
+        w=where_sql, d=sql.Identifier(c["date"]), t=table, q=queue_only)
     rows_sql = sql.SQL("SELECT {p} FROM {t} WHERE {w} ORDER BY {o}").format(
         p=sql.SQL(", ").join(picks), t=table, w=where_sql, o=order)
     return count_sql, rows_sql
@@ -148,7 +151,7 @@ class PostgresRingcxSource:
             conn.read_only = True
             conn.isolation_level = psycopg.IsolationLevel.REPEATABLE_READ
             with conn.transaction():
-                n = conn.execute(count_sql, params).fetchone()[0]
+                n, undated = conn.execute(count_sql, params).fetchone()
                 if n > self.pg["max_rows"]:
                     raise SourceError(f"{where}: {n} rows exceed max_rows {self.pg['max_rows']}; not reading")
                 cur = conn.execute(rows_sql, params)
@@ -174,6 +177,7 @@ class PostgresRingcxSource:
         df[p] = [_plain_phone(v) for v in df[p]]
         df["_row"] = range(2, len(df) + 2)
         self.diag = self._quality(df)
+        self.diag["missing_date"] += int(undated or 0)   # undated rows in the queue, outside the date bound
         self.diag["seconds"] = round(time.monotonic() - t0, 1)
         print(f"  {where}: {n} rows in {self.diag['seconds']}s ({self.diag['first_date']} to {self.diag['last_date']})", flush=True)
         return df
