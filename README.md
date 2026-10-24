@@ -98,13 +98,15 @@ source until `approved_for_dashboard: true`.
   "Closer unknown". It never falls back to the answering agent, and lender CRM fields (Created By, Assignees,
   Assigned To) are not used: they record lender staff or current assignment, not the BFF closer.
 - No closer source is approved yet (`closing_agent.source: null`), so every closed deal is "Closer unknown" and
-  `closing_agent` is not published. The candidate source is the SI tab of the Citizen workbook (`Cln Agent`,
-  matched on phone and the close's lender via `Consolidator`). `--closer-preview` reads it for review only and
-  writes `out/closing_agent_preview.csv` (outside `site/`, never published) with one status per closed deal:
-  `verified`, `missing`, `conflicting` (several closers, or Agent ≠ Cln Agent), `unmapped` (no approved
-  name map entry) or `no_source`. Counts appear in `validation.md`.
-- Using it on the dashboard needs: the source confirmed as authoritative, an approved `name_map`, `source:
-  candidate`, and `closing_agent` added to `publish.fields` (the config check enforces this order).
+  `closing_agent` is not published. The candidate is the SI tab of the Citizen workbook, an `IMPORTRANGE` of the
+  "Sales Input HUB V2" sheet (see `docs/closing_agent_si_investigation.md`). `--closer-preview` reads it for
+  review only and writes aggregate counts and closer names to `out/closing_agent_preview.md` (outside `site/`,
+  never published; no phones or deal rows). Each closed deal gets one status: `no_phone_match`,
+  `lender_mismatch`, `ambiguous` (several matching rows; none is chosen), `invalid_date` (blank, unreadable or
+  future ledger date), `missing`, `conflicting` (Agent differs from Cln Agent), `unmapped` (no approved full
+  name) or `verified`.
+- Using it on the dashboard needs: the source confirmed as authoritative, approved lender values
+  (`lender_values_approved: true`), an approved `name_map`, `source: candidate`, and `closing_agent` added to `publish.fields` (the config check enforces this order).
 
 ## One-time setup
 

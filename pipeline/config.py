@@ -72,11 +72,15 @@ def validate_config(cfg: dict) -> list[str]:
         _need(cand.get("spreadsheet_key") in SOURCE_KEYS, "closing_agent.candidate.spreadsheet_key must name a source", e)
         _need(isinstance(cand.get("worksheet"), str) and cand.get("worksheet"), "closing_agent.candidate.worksheet is missing", e)
         ccols = cand.get("columns") or {}
-        for c in ("phone", "agent", "raw_agent", "lender"):
+        for c in ("phone", "agent", "raw_agent", "lender", "date"):
             _need(isinstance(ccols.get(c), str) and ccols.get(c), f"closing_agent.candidate.columns.{c} is missing", e)
         lv = cand.get("lender_values") or {}
         _need(set(lv) == set(LENDER_KEYS) and all(isinstance(v, list) and v for v in lv.values()),
               "closing_agent.candidate.lender_values must list values for citizen, cordoba and debtblue", e)
+        _need(isinstance(cand.get("lender_values_approved"), bool),
+              "closing_agent.candidate.lender_values_approved must be true or false", e)
+        _need(ca.get("source") is None or cand.get("lender_values_approved") is True,
+              "closing_agent.source: candidate needs approved lender_values", e)
         nm = cand.get("name_map")
         _need(nm is None or (isinstance(nm, dict) and all(isinstance(k, str) and isinstance(v, str) for k, v in nm.items())),
               "closing_agent.candidate.name_map must be null or a mapping of names", e)

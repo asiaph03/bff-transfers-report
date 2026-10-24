@@ -132,13 +132,14 @@ def run(args) -> int:
             except SourceError as e:
                 rep.check(False, "closing-agent ledger readable", str(e))
                 return finish(rep, facts, out, None)
-        leads = rules.assign_closers(leads, ledger, cfg, use_candidate=use)
+        leads = rules.assign_closers(leads, ledger, cfg, use_candidate=use, as_of=dt.date.today())
         counts = rules.closer_counts(leads)
         label = "approved source" if ca["source"] == "candidate" else ("candidate, preview only" if use else "no approved source")
         facts[f"closing agent ({label})"] = ", ".join(f"{k.replace('_', ' ')} {v}" for k, v in counts.items())
-        if ca["source"] == "candidate" and (counts["missing"] or counts["conflicting"] or counts["unmapped"]):
-            rep.warn(f"closing agent unknown for {counts['missing']} missing, {counts['conflicting']} conflicting and "
-                     f"{counts['unmapped']} unmapped closed deal(s)")
+        unknown = {k: v for k, v in counts.items() if k not in ("verified", "verified_differs_from_answering_agent") and v}
+        if ca["source"] == "candidate" and unknown:
+            rep.warn("closing agent unknown for " + ", ".join(f"{v} {k.replace('_', ' ')}" for k, v in unknown.items())
+                     + " closed deal(s)")
     validate.check_business(rep, leads, ringcx, excluded, cfg)
 
     if cfg["validation"]["data_gaps"]["warn_months_without_calls"]:
@@ -148,7 +149,7 @@ def run(args) -> int:
 
     rows = rules.to_public_rows(leads, cfg)
     if args.closer_preview and "closing_agent" in leads:
-        write_closer_preview(out / "closing_agent_preview.csv", leads, rows, cfg)
+        write_closer_preview(out / "closing_agent_preview.md", leads, ledger, cfg)
     totals = rules.summarize(rows)
     validate.check_output(rep, rows, totals, cfg)
     baseline = fetch_baseline(cfg["publish"]["site_url"])
@@ -204,18 +205,30 @@ def read_closer_ledger(cfg: dict, source):
     return source.read(cfg["sources"][cand["spreadsheet_key"]]["spreadsheet_id"], cand["worksheet"], cols)
 
 
-def write_closer_preview(path: Path, leads, rows: list[dict], cfg: dict) -> None:
-    """Preview-only table for review: lead id, lender, answering and closing agent. Never part of the site."""
-    import csv
-
-    names = cfg["lenders"]["display_names"]
-    with open(path, "w", newline="", encoding="utf-8") as f:
-        w = csv.writer(f)
-        w.writerow(["lead_id", "close_lender", "close_status", "answering_agent", "closing_agent", "closer_status"])
-        for row, r in zip(rows, leads.itertuples(index=False)):
-            if bool(r.closed):
-                w.writerow([row["lead_id"], names.get(r.close_lender_key, r.close_lender_key), r.close_status,
-                            r.agent, r.closing_agent, r.closer_status])
+def write_closer_preview(path: Path, leads, ledger, cfg: dict) -> None:
+    """Preview-only review file with aggregate counts and closer names; no phones, client data or per-deal rows.
+    Written beside validation.md, outside site/, so it is never published."""
+    cand = cfg["closing_agent"]["candidate"]
+    d = rules.closer_diagnostics(leads, cfg)
+    lines = ["# Closing-agent preview (diagnostic only, not published)", "",
+             f"Candidate: {cand['name']} ({cand['worksheet']}). Not an approved source. "
+             f"Lender values approved: {cand['lender_values_approved']}. Name map approved: {cand.get('name_map') is not None}.", "",
+             f"Closed deals: {d['closed_deals']}", "", "## Closer status", ""]
+    lines += [f"- {k.replace('_', ' ')}: {v}" for k, v in d["status"].items()]
+    lines += ["", "## Match quality", ""]
+    for k in ("phone_match_any_lender", "exact_phone_and_lender_single_row", "multiple_rows_for_one_deal",
+              "multiple_rows_same_closer", "missing_closer", "agent_vs_cln_agent_differs", "unmapped_closer_name",
+              "future_or_invalid_date", "ledger_date_before_paid_call", "verified_differs_from_answering_agent"):
+        lines.append(f"- {k.replace('_', ' ')}: {d[k]}")
+    for title, key in (("By lender / status", "by_lender"), ("Ledger lender values used by matches", "lender_values_used"),
+                       ("Closer names on matched deals (status)", "closer_names")):
+        lines += ["", f"## {title}", ""] + [f"- {k}: {v}" for k, v in d[key].items()]
+    if ledger is not None:
+        lines += ["", "## Unresolved closer names in the whole ledger (rows)", ""]
+        lines += [f"- {k}: {v}" for k, v in rules.ledger_name_counts(ledger, cand.get("name_map")).items()]
+    text = "\n".join(lines) + "\n"
+    assert_no_secret(text, path.name)
+    path.write_text(text, encoding="utf-8")
 
 
 def finish(rep: validate.Report, facts: dict, out: Path, site: Path | None) -> int:
@@ -238,7 +251,7 @@ def main(argv=None) -> int:
     ap.add_argument("--ringcx-backend", choices=("config", "postgres"), default="config",
                     help="postgres: read RingCX from the database and compare it with the sheet (preview only)")
     ap.add_argument("--closer-preview", action="store_true",
-                    help="also read the candidate closing-agent ledger and write out/closing_agent_preview.csv (never published)")
+                    help="also read the candidate closing-agent ledger and write aggregate counts to out/closing_agent_preview.md (never published)")
     ap.add_argument("--check-config", action="store_true")
     args = ap.parse_args(argv)
     if args.check_config:

@@ -135,11 +135,14 @@ closing_agent:
   source: null                     # null = no verified closer source: every closed deal is "Closer unknown"
   unknown_label: Closer unknown
   candidate:                       # preview-only diagnostics (build --closer-preview); never published
-    name: citizen_si_ledger        # BFF sales/commission ledger, tab SI in the Citizen spreadsheet (all lenders)
+    name: citizen_si_ledger        # tab SI in the Citizen spreadsheet = IMPORTRANGE of "Sales Input HUB V2" /
+                                   # "Sales Input Database" (A2:AE). Not confirmed as authoritative.
     spreadsheet_key: citizen       # same spreadsheet as sources.citizen
     worksheet: SI
-    columns: {phone: "Phone #", agent: Cln Agent, raw_agent: Agent, lender: Consolidator}
-    lender_values:                 # ledger Consolidator values that count as each lender (to be confirmed)
+    # Cln Agent is computed in the hub as XLOOKUP(Agent, Settings!M:M -> N:N, else Agent): a cleaned alias of Agent.
+    columns: {phone: "Phone #", agent: Cln Agent, raw_agent: Agent, lender: Consolidator, date: Date}
+    lender_values_approved: false  # the lists below are PROPOSED; source: candidate needs them approved
+    lender_values:                 # ledger Consolidator values proposed to count as each lender
       citizen: [Citizen, CDPCitizens, IPLFCitizens]
       cordoba: [Cordoba]
       debtblue: [Debt Blue]
