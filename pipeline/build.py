@@ -122,6 +122,23 @@ def run(args) -> int:
             facts.update(validate.compare_ringcx(rep, ringcx, sheet_rcx, leads_before_match, cfg))
     crm = rules.prepare_lenders(tables, cfg)
     leads, excluded = rules.match_closes(leads, crm, cfg)
+    ca = cfg.get("closing_agent")
+    if ca:
+        use = ca["source"] == "candidate" or args.closer_preview
+        ledger = None
+        if use:
+            try:
+                ledger = rules.prepare_closer_ledger(read_closer_ledger(cfg, source), ca["candidate"], cfg)
+            except SourceError as e:
+                rep.check(False, "closing-agent ledger readable", str(e))
+                return finish(rep, facts, out, None)
+        leads = rules.assign_closers(leads, ledger, cfg, use_candidate=use)
+        counts = rules.closer_counts(leads)
+        label = "approved source" if ca["source"] == "candidate" else ("candidate, preview only" if use else "no approved source")
+        facts[f"closing agent ({label})"] = ", ".join(f"{k.replace('_', ' ')} {v}" for k, v in counts.items())
+        if ca["source"] == "candidate" and (counts["missing"] or counts["conflicting"] or counts["unmapped"]):
+            rep.warn(f"closing agent unknown for {counts['missing']} missing, {counts['conflicting']} conflicting and "
+                     f"{counts['unmapped']} unmapped closed deal(s)")
     validate.check_business(rep, leads, ringcx, excluded, cfg)
 
     if cfg["validation"]["data_gaps"]["warn_months_without_calls"]:
@@ -130,6 +147,8 @@ def run(args) -> int:
             rep.warn(f"Ringba has no calls in {', '.join(gaps)} (inside the reporting window)")
 
     rows = rules.to_public_rows(leads, cfg)
+    if args.closer_preview and "closing_agent" in leads:
+        write_closer_preview(out / "closing_agent_preview.csv", leads, rows, cfg)
     totals = rules.summarize(rows)
     validate.check_output(rep, rows, totals, cfg)
     baseline = fetch_baseline(cfg["publish"]["site_url"])
@@ -173,6 +192,32 @@ def run(args) -> int:
     return finish(rep, facts, out, site)
 
 
+def read_closer_ledger(cfg: dict, source):
+    """Read the candidate closer ledger (read-only, same sign-in as the other sheets)."""
+    cand = cfg["closing_agent"]["candidate"]
+    cols = list(cand["columns"].values())
+    print(f"reading closing-agent candidate / {cand['worksheet']} ({len(cols)} columns)", flush=True)
+    if isinstance(source, LocalSource):
+        return source.read_key(cand["spreadsheet_key"], cand["worksheet"], cols)
+    if hasattr(source, "start_source"):
+        source.start_source()
+    return source.read(cfg["sources"][cand["spreadsheet_key"]]["spreadsheet_id"], cand["worksheet"], cols)
+
+
+def write_closer_preview(path: Path, leads, rows: list[dict], cfg: dict) -> None:
+    """Preview-only table for review: lead id, lender, answering and closing agent. Never part of the site."""
+    import csv
+
+    names = cfg["lenders"]["display_names"]
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(["lead_id", "close_lender", "close_status", "answering_agent", "closing_agent", "closer_status"])
+        for row, r in zip(rows, leads.itertuples(index=False)):
+            if bool(r.closed):
+                w.writerow([row["lead_id"], names.get(r.close_lender_key, r.close_lender_key), r.close_status,
+                            r.agent, r.closing_agent, r.closer_status])
+
+
 def finish(rep: validate.Report, facts: dict, out: Path, site: Path | None) -> int:
     text = rep.markdown("BFF Transfers refresh: validation report", facts)
     assert_no_secret(text, "validation.md")
@@ -192,6 +237,8 @@ def main(argv=None) -> int:
     ap.add_argument("--preview", action="store_true", help="preview build: a missing baseline is a warning, not a failure")
     ap.add_argument("--ringcx-backend", choices=("config", "postgres"), default="config",
                     help="postgres: read RingCX from the database and compare it with the sheet (preview only)")
+    ap.add_argument("--closer-preview", action="store_true",
+                    help="also read the candidate closing-agent ledger and write out/closing_agent_preview.csv (never published)")
     ap.add_argument("--check-config", action="store_true")
     args = ap.parse_args(argv)
     if args.check_config:

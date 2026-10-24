@@ -226,6 +226,67 @@ def match_closes(leads: pd.DataFrame, crm: pd.DataFrame, cfg: dict) -> tuple[pd.
     return out, excluded
 
 
+# ---------- closing agent (separate from the answering agent) ----------
+
+CLOSER_STATUSES = ("not_closed", "verified", "missing", "conflicting", "unmapped", "no_source")
+
+
+def prepare_closer_ledger(df: pd.DataFrame, cand: dict, cfg: dict) -> pd.DataFrame:
+    """Ledger rows as phone / agent / raw_agent / lender text; phones use the dashboard's normalization."""
+    c, p = cand["columns"], cfg["phone"]
+    return pd.DataFrame({
+        "phone": df[c["phone"]].map(lambda v: norm_phone(v, p["digits"], p["min_digits"])).values,
+        "agent": df[c["agent"]].map(clean_text).values,
+        "raw_agent": df[c["raw_agent"]].map(clean_text).values,
+        "lender": df[c["lender"]].map(clean_text).values,
+    })
+
+
+def assign_closers(leads: pd.DataFrame, ledger: pd.DataFrame | None, cfg: dict, use_candidate: bool) -> pd.DataFrame:
+    """Add closing_agent and closer_status. Never falls back to the answering agent.
+
+    Closed lead + no approved source -> unknown ("no_source"). With a source: ledger rows with the lead's phone
+    and the closing lender's ledger values; no agent -> "missing"; more than one distinct agent, or the raw and
+    cleaned agent columns disagree -> "conflicting"; a name absent from the approved name map -> "unmapped";
+    otherwise "verified" with the mapped name. Leads that did not close get no closer ("not_closed").
+    """
+    ca = cfg["closing_agent"]
+    unknown = ca["unknown_label"]
+    cand = ca["candidate"]
+    name_map = {k.strip().upper(): v for k, v in (cand.get("name_map") or {}).items()}
+    out = leads.copy()
+    agents, statuses = [], []
+    by_phone = ledger.groupby("phone") if ledger is not None and len(ledger) else None
+    for r in out.itertuples(index=False):
+        if not bool(r.closed):
+            agents.append(None); statuses.append("not_closed"); continue
+        if not use_candidate or by_phone is None:
+            agents.append(unknown); statuses.append("no_source"); continue
+        rows = by_phone.get_group(r.phone) if r.phone in by_phone.groups else ledger.iloc[0:0]
+        rows = rows[rows["lender"].isin(cand["lender_values"].get(r.close_lender_key, []))]
+        names = sorted({a for a in rows["agent"] if a})
+        raw_conflict = bool(((rows["agent"] != "") & (rows["raw_agent"] != "") & (rows["agent"] != rows["raw_agent"])).any())
+        if not names:
+            agents.append(unknown); statuses.append("missing")
+        elif len(names) > 1 or raw_conflict:
+            agents.append(unknown); statuses.append("conflicting")
+        elif names[0].upper() not in name_map:
+            agents.append(unknown); statuses.append("unmapped")
+        else:
+            agents.append(name_map[names[0].upper()]); statuses.append("verified")
+    out["closing_agent"] = agents
+    out["closer_status"] = statuses
+    return out
+
+
+def closer_counts(leads: pd.DataFrame) -> dict:
+    closed = leads[leads["closed"]]
+    counts = {s: int((closed["closer_status"] == s).sum()) for s in CLOSER_STATUSES if s != "not_closed"}
+    v = closed[closed["closer_status"] == "verified"]
+    counts["verified_differs_from_answering_agent"] = int((v["closing_agent"].str.upper() != v["agent"].str.upper()).sum())
+    return counts
+
+
 # ---------- output rows ----------
 
 def to_public_rows(leads: pd.DataFrame, cfg: dict) -> list[dict]:

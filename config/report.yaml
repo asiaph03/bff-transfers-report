@@ -129,6 +129,22 @@ lenders:
   close_must_be_on_or_after_paid_date: true   # U6: calendar dates only
   count_each_lead_once: earliest_close_date
 
+closing_agent:
+  # Closed-deal attribution, kept separate from the RingCX answering agent (the published `agent` field,
+  # which stays as it is for every lead). Nothing here is published until the owner approves a source.
+  source: null                     # null = no verified closer source: every closed deal is "Closer unknown"
+  unknown_label: Closer unknown
+  candidate:                       # preview-only diagnostics (build --closer-preview); never published
+    name: citizen_si_ledger        # BFF sales/commission ledger, tab SI in the Citizen spreadsheet (all lenders)
+    spreadsheet_key: citizen       # same spreadsheet as sources.citizen
+    worksheet: SI
+    columns: {phone: "Phone #", agent: Cln Agent, raw_agent: Agent, lender: Consolidator}
+    lender_values:                 # ledger Consolidator values that count as each lender (to be confirmed)
+      citizen: [Citizen, CDPCitizens, IPLFCitizens]
+      cordoba: [Cordoba]
+      debtblue: [Debt Blue]
+    name_map: null                 # owner-approved ledger nickname -> agent name; unmapped names stay unknown
+
 validation:
   data_gaps:
     warn_months_without_calls: true    # U7: a warning, not a failure

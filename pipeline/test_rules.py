@@ -870,3 +870,104 @@ def test_pg_without_sequence_column_skips_that_check(cfg, monkeypatch):
     rep = validate.Report()
     validate.check_pg_quality(rep, src.diag, rules.prepare_ringcx(df, cfg), cfg)
     assert rep.ok
+
+
+# ---- closing agent, separate from the answering agent (simulated data only) ----
+def _closed_leads(cfg):
+    L = pd.DataFrame({"phone": [fake_phone(1), fake_phone(2), fake_phone(3), fake_phone(4)],
+                      "agent": ["Ana Answer", "Ben Answer", "Cy Answer", "Di Answer"],
+                      "closed": [True, True, True, False],
+                      "close_lender_key": ["cordoba", "citizen", "debtblue", None]})
+    return L
+
+
+def _ledger(rows):
+    return pd.DataFrame(rows, columns=["phone", "agent", "raw_agent", "lender"])
+
+
+def _closer_cfg(cfg, source="candidate", name_map=None):
+    c = copy.deepcopy(cfg)
+    c["closing_agent"]["source"] = source
+    c["closing_agent"]["candidate"]["name_map"] = name_map
+    return c
+
+
+def test_shipped_config_has_no_closer_source_and_does_not_publish_it():
+    c = load_config(CFG_PATH)
+    assert c["closing_agent"]["source"] is None and c["closing_agent"]["candidate"]["name_map"] is None
+    assert "closing_agent" not in c["publish"]["fields"]
+
+
+def test_closer_config_guards():
+    c = load_config(CFG_PATH)
+    bad = copy.deepcopy(c); bad["closing_agent"]["source"] = "candidate"          # no approved name map
+    assert any("approved name_map" in p for p in validate_config(bad))
+    bad = copy.deepcopy(c); bad["publish"]["fields"] = bad["publish"]["fields"] + ["closing_agent"]
+    assert any("closing_agent only once" in p for p in validate_config(bad))
+
+
+def test_no_source_means_every_closed_deal_is_closer_unknown(cfg):
+    out = rules.assign_closers(_closed_leads(cfg), None, cfg, use_candidate=False)
+    assert list(out["closer_status"]) == ["no_source", "no_source", "no_source", "not_closed"]
+    assert list(out["closing_agent"][:3]) == ["Closer unknown"] * 3 and out["closing_agent"][3] is None
+    assert list(out["agent"]) == ["Ana Answer", "Ben Answer", "Cy Answer", "Di Answer"]     # answering agent untouched
+
+
+def test_known_closer_differs_from_answering_agent(cfg):
+    c = _closer_cfg(cfg, name_map={"Closer One": "Closer Person", "Closer Two": "Second Closer"})
+    led = _ledger([(fake_phone(1), "Closer One", "Closer One", "Cordoba"),
+                   (fake_phone(2), "Closer Two", "Closer Two", "CDPCitizens")])
+    out = rules.assign_closers(_closed_leads(c), led, c, use_candidate=True)
+    assert list(out["closing_agent"][:2]) == ["Closer Person", "Second Closer"]
+    assert list(out["closer_status"][:2]) == ["verified", "verified"]
+    counts = rules.closer_counts(out)
+    assert counts["verified"] == 2 and counts["verified_differs_from_answering_agent"] == 2 and counts["missing"] == 1
+
+
+def test_missing_closer_never_falls_back_to_the_answering_agent(cfg):
+    c = _closer_cfg(cfg, name_map={"X": "X"})
+    led = _ledger([(fake_phone(1), "", "", "Cordoba"),                  # row without an agent
+                   (fake_phone(2), "X", "X", "Cordoba"),                # agent recorded for a different lender
+                   (fake_phone(9), "X", "X", "Debt Blue")])             # another phone
+    out = rules.assign_closers(_closed_leads(c), led, c, use_candidate=True)
+    assert list(out["closer_status"][:3]) == ["missing", "missing", "missing"]
+    assert list(out["closing_agent"][:3]) == ["Closer unknown"] * 3
+    assert "Ana Answer" not in set(out["closing_agent"].dropna())
+
+
+def test_conflicting_closer_values_are_unknown(cfg):
+    c = _closer_cfg(cfg, name_map={"A": "A", "B": "B"})
+    led = _ledger([(fake_phone(1), "A", "A", "Cordoba"), (fake_phone(1), "B", "B", "Cordoba"),   # two closers
+                   (fake_phone(2), "A", "B", "Citizen")])                                        # raw vs cleaned disagree
+    out = rules.assign_closers(_closed_leads(c), led, c, use_candidate=True)
+    assert list(out["closer_status"][:2]) == ["conflicting", "conflicting"]
+    assert rules.closer_counts(out)["conflicting"] == 2
+
+
+def test_unmapped_ledger_name_stays_unknown(cfg):
+    c = _closer_cfg(cfg, name_map={"Someone Else": "Someone Else"})
+    led = _ledger([(fake_phone(3), "Nickname", "Nickname", "Debt Blue")])
+    out = rules.assign_closers(_closed_leads(c), led, c, use_candidate=True)
+    assert out["closer_status"][2] == "unmapped" and out["closing_agent"][2] == "Closer unknown"
+
+
+def test_closer_ledger_uses_dashboard_phone_normalisation(cfg):
+    cand = cfg["closing_agent"]["candidate"]
+    raw = pd.DataFrame({"Phone #": ["(555) 000-0001", 15550000002.0, "12"], "Cln Agent": [" A ", "B", "C"],
+                        "Agent": ["A", "B", "C"], "Consolidator": ["Cordoba", "Citizen", "Debt Blue"]})
+    led = rules.prepare_closer_ledger(raw, cand, cfg)
+    assert list(led["phone"]) == ["5550000001", "5550000002", ""] and led["agent"][0] == "A"
+
+
+def test_published_rows_do_not_gain_closing_agent(cfg):
+    L = leads_from(cfg, [("a", "2026-05-10 10:00", fake_phone(1), 32), ("b", "2026-05-11 10:00", fake_phone(2), 32),
+                         ("c", "2026-05-12 10:00", fake_phone(3), 32)])[0]
+    L = rules.match_agents(L, rules.prepare_ringcx(rcx([]), cfg), cfg)
+    crm = rules.prepare_lenders({k: pd.DataFrame({**{col: [] for col in (cfg["sources"][k]["columns"]["phones"]
+                                  + [cfg["sources"][k]["columns"][x] for x in ("status", "close_date", "agent")]
+                                  + ([cfg["sources"][k]["columns"]["debt"]] if cfg["sources"][k]["columns"]["debt"] else []))},
+                                  "_row": []}) for k in ("citizen", "cordoba", "debtblue")}, cfg)
+    L, _ = rules.match_closes(L, crm, cfg)
+    L = rules.assign_closers(L, None, cfg, use_candidate=False)
+    rows = rules.to_public_rows(L, cfg)
+    assert all(list(r) == cfg["publish"]["fields"] for r in rows) and all("closing_agent" not in r for r in rows)

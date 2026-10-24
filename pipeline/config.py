@@ -62,6 +62,29 @@ def validate_config(cfg: dict) -> list[str]:
 
         e.extend(check_pg_config(rcx.get("postgres")))
 
+    ca = cfg.get("closing_agent")
+    if ca is not None:
+        _need(isinstance(ca, dict), "closing_agent must be a mapping", e)
+        ca = ca if isinstance(ca, dict) else {}
+        _need(ca.get("source") in (None, "candidate"), "closing_agent.source must be null or candidate", e)
+        _need(isinstance(ca.get("unknown_label"), str) and ca.get("unknown_label"), "closing_agent.unknown_label is missing", e)
+        cand = ca.get("candidate") or {}
+        _need(cand.get("spreadsheet_key") in SOURCE_KEYS, "closing_agent.candidate.spreadsheet_key must name a source", e)
+        _need(isinstance(cand.get("worksheet"), str) and cand.get("worksheet"), "closing_agent.candidate.worksheet is missing", e)
+        ccols = cand.get("columns") or {}
+        for c in ("phone", "agent", "raw_agent", "lender"):
+            _need(isinstance(ccols.get(c), str) and ccols.get(c), f"closing_agent.candidate.columns.{c} is missing", e)
+        lv = cand.get("lender_values") or {}
+        _need(set(lv) == set(LENDER_KEYS) and all(isinstance(v, list) and v for v in lv.values()),
+              "closing_agent.candidate.lender_values must list values for citizen, cordoba and debtblue", e)
+        nm = cand.get("name_map")
+        _need(nm is None or (isinstance(nm, dict) and all(isinstance(k, str) and isinstance(v, str) for k, v in nm.items())),
+              "closing_agent.candidate.name_map must be null or a mapping of names", e)
+        _need(ca.get("source") is None or isinstance(nm, dict),
+              "closing_agent.source: candidate needs an approved name_map", e)
+        _need("closing_agent" not in cfg.get("publish", {}).get("fields", []) or ca.get("source") == "candidate",
+              "publish.fields may include closing_agent only once a closer source is approved", e)
+
     pl = cfg.get("paid_leads", {})
     _need(isinstance(pl.get("min_payout_exclusive"), (int, float)), "paid_leads.min_payout_exclusive must be a number", e)
     _need(pl.get("dedupe") == "latest_paid_call_per_phone", "paid_leads.dedupe must be latest_paid_call_per_phone", e)

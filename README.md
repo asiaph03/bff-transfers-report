@@ -90,6 +90,22 @@ source until `approved_for_dashboard: true`.
 - Active: closed and not Cancelled, Returned, Cancellation Review, File Returned or Dropped / Cancelled.
 - A status that is neither closing nor a known non-closing status fails the run until it is reviewed.
 
+### Answering agent and closing agent
+
+- `agent` is the **answering agent** (the RingCX rule above). It drives the funnel and call metrics for every
+  lead, closed or not, and is never replaced by a closer.
+- `closing_agent` is a separate field for closed deals only: the closer from an approved source, or
+  "Closer unknown". It never falls back to the answering agent, and lender CRM fields (Created By, Assignees,
+  Assigned To) are not used: they record lender staff or current assignment, not the BFF closer.
+- No closer source is approved yet (`closing_agent.source: null`), so every closed deal is "Closer unknown" and
+  `closing_agent` is not published. The candidate source is the SI tab of the Citizen workbook (`Cln Agent`,
+  matched on phone and the close's lender via `Consolidator`). `--closer-preview` reads it for review only and
+  writes `out/closing_agent_preview.csv` (outside `site/`, never published) with one status per closed deal:
+  `verified`, `missing`, `conflicting` (several closers, or Agent ≠ Cln Agent), `unmapped` (no approved
+  name map entry) or `no_source`. Counts appear in `validation.md`.
+- Using it on the dashboard needs: the source confirmed as authoritative, an approved `name_map`, `source:
+  candidate`, and `closing_agent` added to `publish.fields` (the config check enforces this order).
+
 ## One-time setup
 
 ### 1. Google service account (read-only, no key)
