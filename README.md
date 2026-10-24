@@ -210,12 +210,26 @@ block publishing and are shown at the bottom of the page.
 3. Run **Refresh dashboard** with `mode: preview`, review, then `mode: publish`.
    A large intended change will trip the baseline limits; raise the limit in the same commit and note why.
 
+### Live updates in the browser
+
+An open dashboard notices a newly published report and shows it without a reload. `summary.json` carries a small
+manifest (`report.version`, a hash of the exact bytes of `data.json`, plus its size and row count). While the tab is
+visible the page checks `summary.json` every 60 seconds (forcing revalidation, because GitHub Pages lets browsers reuse
+a file for 10 minutes); only when the version changed does it download `data.json`, and it verifies that download
+(hash, size, row count, timestamp, structure) before replacing anything. A failed, stale, partial or malformed
+response never replaces the report on screen; checks back off to at most 10 minutes while the network is failing, and
+resume by themselves. A new report is noticed at the first check after GitHub Pages starts serving it; how quickly Pages
+serves a new deployment is not guaranteed (its documentation says up to about 10 minutes). If the selected agent is not in a
+new report the page says so and shows all agents, and the selection returns if the agent does. Details, request costs,
+accessibility notes and limitations: `docs/dashboard_polling.md`.
+
 ## Local testing
 
 ```
 pip install -r pipeline/requirements.txt
 python -m pytest -q pipeline
 python -m pipeline.build --check-config
+node --test tests_js/poll.test.mjs tests_js/dash.test.mjs     # the page's update check; no packages needed (pytest runs it too when Node is installed)
 ```
 
 ### Speed and timings

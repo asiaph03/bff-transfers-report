@@ -81,7 +81,7 @@ retry and last-known-good behaviour matter more than raw speed.
 |---|---|---|---|
 | Incremental cost | **$0** while the repo is public (Actions minutes free for public repos; verified) | $0 only if capacity, network and access check out (**Unknown**) | **Not shown to be $0** (section 7) |
 | New attack surface | None (static, allowlisted fields only) | Database reachable from GitHub runners (dynamic addresses) or from a PC | Public API, secrets, auth to maintain |
-| Meets "poll every 15 s, fetch on change" | Yes, with conditional requests on `summary.json` (section 8.2) | Not by itself | Yes |
+| Meets "poll for a new version, fetch on change" (60 s interval as built; 15 s was the first target) | Yes, with conditional requests on `summary.json` (section 8.2) | Not by itself | Yes |
 | `fresh / refreshing / stale / failed` states | `fresh`, `stale`, `failed` fully; `refreshing` only with an extra status publish (section 8.3) | Needs an API | Fully |
 | Preserves last-known-good | Yes: a failed run publishes nothing | Yes if pointer-swap is built | Yes |
 | Handles millions of rows | Memory yes (staged ingestion); source ceiling is Sheets (20 M cells per file; verified) | Yes, plus staging history | Yes |
@@ -136,7 +136,7 @@ ordering is validated and you approve. It is not needed to publish the report.
 |---|---|
 | Actions minutes at 30-minute cadence, about 10 min per run | 1,440 runs/month, about **14,400 min/month**: free while public; **would exceed the 2,000-minute private-repo quota in about 4 days** and then be blocked |
 | Pages deploys | 1,440/month; no builds/hour limit applies; each file set is about 115 KB |
-| Dashboard polling `summary.json` (790 B) every 15 s per open tab | 172,800 requests/month; with conditional requests about 70 MB/month per tab; 100 tabs about 7 GB, well under 100 GB |
+| Dashboard polling `summary.json` (about 0.9 KB) every 60 s per open tab | 43,200 requests/month if a tab stays open and visible all month; measured on the live site, a conditional request answered `304` is about 395 bytes and a full response about 1,525, so about 17 MB/month per tab when the report is unchanged (66 MB if every check were a full response); 100 tabs about 1.7 to 6.6 GB, well under 100 GB |
 | Cloud Run job, 1 vCPU, 10 min, 15-minute cadence | about 1.7 M vCPU-s/month against a 180,000 vCPU-s request-based free allowance: **not free** (roughly $29/month at the quoted job rate) |
 | Largest per-run Cloud Run time that fits the free vCPU-seconds at 30-minute cadence | 180,000 / 1,440 = **125 s per run**; today's runs take 3 to 17 minutes |
 
@@ -175,7 +175,7 @@ flowchart LR
   end
   S[(Five Google Sheets tabs)] --> ST
   PG --> CDN[Pages CDN]
-  CDN --> B[Dashboard: poll summary.json\nevery 15 s, conditional request\nfetch data.json only when version changes]
+  CDN --> B[Dashboard: poll summary.json\nevery 60 s, conditional request\nfetch data.json only when version changes]
   RDS[(ringcx_inbound\noptional, preview compare)] -. only after validation and your approval .-> ST
 ```
 
@@ -185,11 +185,21 @@ path that re-publishes the last known good files with an accurate status, (c) a 
 dashboard's version polling, and (e) the staged-ingestion code (local, flag off). No server, database, secret or
 paid service is added.
 
-### 8.2 Polling every 15 seconds on static hosting
+### 8.2 Polling every 60 seconds on static hosting
 Pages tells browsers to cache for 600 s. A plain `fetch` would therefore show data up to 10 minutes late. The page
-should request `summary.json` with revalidation (`cache: 'no-cache'`), which sends the `ETag` and gets a tiny `304`
-unless a new deploy changed it. `data.json` is fetched only when `summary.json`'s version differs. The CDN-side
-behaviour of conditional requests on Pages is documented only indirectly; it must be tested after any change.
+requests `summary.json` at its plain address with revalidation (`cache: 'no-cache'`), which sends the `ETag` and gets a tiny
+`304` unless a new deploy changed it (a changing query key would defeat this, because the browser would have nothing to
+validate). `data.json` is fetched only when `summary.json`'s version differs.
+
+What was observed on the live site (read-only requests, 25 Oct 2026): files carry `Cache-Control: max-age=600` and an
+`ETag`; conditional requests are answered `304`; the CDN's `Age` for an unchanged file rises steadily towards 600 seconds
+and then restarts, so the edge can hold a copy for up to 10 minutes; and the edge answers every query string from the same
+cached object, so query strings cannot be used to get a fresh copy past it. **Not verified:** whether a new deployment purges
+or refreshes those edge copies (no deployment was made), and how long a new report takes to be served. GitHub's Pages
+documentation says changes can take up to 10 minutes to be published after a push, so a new report may be served up to
+about 10 minutes after the deploy, plus up to one polling interval before an open page sees it. Revalidation does not
+shorten the CDN's delay. The page's verification (hash, size, row count) and its retries exist so that a lag, or a new summary
+beside an old data file, is never displayed as a report.
 
 ### 8.3 Status states on static hosting
 `fresh` (last success within the expected window) and `stale` (older than a few intervals) come from
