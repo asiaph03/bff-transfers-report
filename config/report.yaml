@@ -48,11 +48,17 @@ sources:
         result: call_result
         agent: agent_full_name
         phone: ani
-        call_id: uii                 # candidate id; uniqueness and meaning still to be confirmed
+        call_id: uii                 # interaction id, NOT a row id: 411 of 1,690 rows repeat a uii (owner's check, Oct 24)
         queue: queue
       queue_value: Two-Minute Transfers
       all_rows_are_queue: false
-      order_by: [interaction_date, uii]   # PROPOSED stand-in for sheet order (U2); not approved
+      # Live read-only checks (Oct 24): interaction_date is a date (time always 00:00); enqueue_start_time is
+      # "HH:MM:SS US/Eastern", 24-hour, fixed length, so text order is time order within a day and it separates
+      # all 59 same-day multi-agent cases (uii separates 49). The database holds the same 190 accepted calls in
+      # those cases as the sheet, but neither time order (either direction) nor uii order reproduces the sheet's
+      # row order, which follows how report rows were appended. Up to 11 of the 300 leads take their agent from
+      # such a case. Switching therefore changes rule U2 and needs the owner's decision.
+      order_by: [interaction_date, enqueue_start_time, uii]   # PROPOSED: earliest call of the day first; not approved
       order_by_approved: false
       approved_for_dashboard: false  # true only after a clean comparison and the owner's approval
       timestamp_timezone: null       # needed only if interaction_date is a zone-aware timestamp

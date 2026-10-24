@@ -626,7 +626,8 @@ def test_pg_query_is_read_only_bounded_parameterised_and_ordered(monkeypatch):
     rows_sql = conn.sql[1]
     assert rows_sql.startswith('SELECT "interaction_date" AS "Date", "call_result" AS "Call Result", '
                                '"agent_full_name" AS "Agent Full Name", "ani" AS "ANI", "uii" AS "_call_id"')
-    assert 'FROM "public"."ringcx_inbound"' in rows_sql and 'ORDER BY "interaction_date", "uii"' in rows_sql
+    assert 'FROM "public"."ringcx_inbound"' in rows_sql
+    assert 'ORDER BY "interaction_date", "enqueue_start_time", "uii"' in rows_sql
     assert '"interaction_date" >= %(since)s AND "queue" = %(queue)s' in rows_sql and "Two-Minute" not in rows_sql
     assert conn.params[1] == {"since": _dt.date(2026, 4, 1), "queue": "Two-Minute Transfers"}
     assert not any(w in " ".join(conn.sql).upper() for w in ("INSERT", "UPDATE", "DELETE", "TRUNCATE", "ALTER", "CREATE", "DROP", "GRANT"))

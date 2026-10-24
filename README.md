@@ -58,9 +58,13 @@ Mapping (from the owner's pgAdmin inspection): `interaction_date` = date, `call_
 `agent_full_name` = agent, `ani` = phone, `uii` = candidate call id, `queue` = queue (filter
 `Two-Minute Transfers`), from 2026-04-01. `agent_email` is not used by any rule.
 
-**Open before switching:** the sheet's row order decides same-day agent ties (U2). The proposed stand-in is
-`ORDER BY interaction_date, uii` (`order_by_approved: false`); it is used only if a comparison shows it
-settles every tie the way the sheet does, and the owner approves.
+**Open before switching:** the sheet's row order decides same-day agent ties (U2). Read-only checks on the
+live table (Oct 24) found the same calls in those cases but no column that reproduces the sheet's order:
+`interaction_date` has no time, `uii` repeats across rows of one call, and ordering by `enqueue_start_time`
+(time of day, in either direction) or by `uii` settles the ties differently from the sheet. The proposed
+`ORDER BY interaction_date, enqueue_start_time, uii` (earliest call of the day first) would be a change to U2,
+affecting the agent shown for up to 11 of 300 leads; it stays unapproved (`order_by_approved: false`) and a
+comparison run will report exactly which leads differ.
 
 **Comparison run (preview only, nothing published):** Actions -> Refresh dashboard -> `mode: preview`,
 `ringcx_source: postgres-compare`. Needs the repository secret `RINGCX_DATABASE_URL` (read-only role) and a
