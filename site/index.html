@@ -35,6 +35,9 @@ body { margin: 0; background: var(--bg); color: var(--color-fg); font-family: va
 .tm-head { display: flex; flex-wrap: wrap; gap: var(--cds-gap-md); align-items: flex-end; justify-content: space-between; }
 .tm-head h1 { font-family: var(--font-serif); font-weight: 400; font-size: var(--cds-font-size-title); margin: 0; text-wrap: balance; }
 .tm-sub { color: var(--color-fg-muted); font-size: var(--cds-font-size-caption); margin: var(--cds-gap-xs) 0 0; }
+.tm-updates { color: var(--color-fg-muted); font-size: var(--cds-font-size-caption); margin: var(--cds-gap-xs) 0 0; }
+.tm-updates.warn { color: var(--color-bad); }
+.sr-only { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
 .tm-take { margin: var(--cds-gap-sm) 0 0; font-size: var(--cds-font-size-body); max-width: 60ch; }
 .tm-take b { font-weight: 600; }
 .tm-controls { display: flex; flex-wrap: wrap; gap: var(--cds-gap-sm); align-items: center; }
@@ -81,11 +84,168 @@ body { margin: 0; background: var(--bg); color: var(--color-fg); font-family: va
 </head><body>
 <script src="vendor/d3.v7.8.5.min.js"></script>
 <script>
+/* BFF-POLL:BEGIN */
+/* Update check. Polls the small summary.json for a new report version; only when the version changed does it download
+   data.json, and it VERIFIES that download (hash, size, row count, structure) before anything on screen is replaced.
+   Everything the browser provides is passed in, so this block is unit-tested without a browser (tests_js/poll.test.mjs). */
+const BffPoll = (() => {
+  const DEFAULTS = {
+    intervalMs: 60000,                       // time between checks while the tab is visible
+    maxBackoffMs: 600000,                    // longest wait after repeated failures (10 minutes)
+    jitter: 0.1,                             // every wait varies by up to +/-10% so open tabs do not call in step
+    requestTimeoutMs: 10000,                 // give up on one request after 10 s
+    minGapMs: 2000,                          // never start two checks closer than this (tab switches, coming back online)
+    retryDelaysMs: [5000, 10000, 20000],     // new summary seen but its data does not match yet: look again quickly, 3 times
+    failuresBeforeNotice: 3,                 // consecutive failed checks before the reader is told updates cannot be checked
+    maxSummaryBytes: 65536, maxDataBytes: 5242880,
+  };
+  const VERSION_RE = /^[A-Za-z0-9_-]{16,64}$/;
+  // Fields the page reads from every row; a report missing any of them is not displayed.
+  const ROW_KEYS = ['lead_id', 'paid_call', 'week_start', 'month', 'agent', 'answered', 'connected', 'converted', 'in_lender_crm',
+    'in_citizen', 'in_cordoba', 'in_debtblue', 'closed', 'active', 'close_lender', 'close_status', 'days_to_close', 'debt_enrolled', 'payout'];
+  const NUM_KEYS = ['answered', 'connected', 'converted', 'in_lender_crm', 'in_citizen', 'in_cordoba', 'in_debtblue', 'closed', 'active', 'payout'];
+  const isObj = (x) => x !== null && typeof x === 'object' && !Array.isArray(x);
+  const validDate = (s) => typeof s === 'string' && s.length >= 10 && Number.isFinite(Date.parse(s));
+
+  /* Why a summary cannot be used, or null. Reasons never contain values from the report. */
+  function checkSummary(s) {
+    if (!isObj(s)) return 'summary is not an object';
+    if (!validDate(s.refreshed_at)) return 'summary has no readable refreshed_at';
+    if (s.report !== undefined) {
+      const r = s.report;
+      if (!isObj(r)) return 'summary report is not an object';
+      if (typeof r.version !== 'string' || !VERSION_RE.test(r.version)) return 'summary report version is malformed';
+      if (r.data_file !== 'data.json') return 'summary report names an unexpected file';
+      if (!Number.isInteger(r.data_bytes) || r.data_bytes <= 0 || r.data_bytes > DEFAULTS.maxDataBytes) return 'summary report size is malformed';
+      if (!Number.isInteger(r.rows) || r.rows < 0) return 'summary report row count is malformed';
+    }
+    return null;
+  }
+  function checkRow(r) {
+    if (!isObj(r)) return 'a row is not an object';
+    for (const k of ROW_KEYS) if (!(k in r)) return 'a row is missing ' + k;
+    if (typeof r.lead_id !== 'string' || !r.lead_id) return 'a row has no lead_id';
+    for (const k of ['paid_call', 'week_start', 'month', 'agent']) if (typeof r[k] !== 'string' || !r[k]) return 'a row has an unreadable ' + k;
+    if (r.paid_call.length < 19 || !Number.isFinite(Date.parse(r.paid_call.slice(0, 19) + 'Z'))) return 'a row has an unreadable paid_call';
+    for (const k of NUM_KEYS) if (typeof r[k] !== 'number' || !Number.isFinite(r[k])) return 'a row has an unreadable ' + k;
+    return null;
+  }
+  /* Why downloaded data cannot replace what is shown, or null. `version` is null when the browser cannot hash. */
+  function checkData(d, s, size, version) {
+    if (!isObj(d) || !Array.isArray(d.rows) || d.rows.length === 0) return 'data has no rows';
+    if (d.refreshed_at !== s.refreshed_at) return 'data and summary do not match';
+    if (s.report) {
+      if (size !== s.report.data_bytes) return 'data size differs from the manifest';
+      if (d.rows.length !== s.report.rows) return 'data row count differs from the manifest';
+      if (version !== null && version !== s.report.version) return 'data hash differs from the manifest';
+    }
+    for (const r of d.rows) { const why = checkRow(r); if (why) return why; }
+    return null;
+  }
+  /* 24 base64url characters: the first 18 bytes of SHA-256. Must equal pipeline.build.report_version for the same bytes. */
+  async function versionOf(buf, subtle) {
+    const d = new Uint8Array(await subtle.digest('SHA-256', buf)).subarray(0, 18);
+    let s = ''; for (const b of d) s += String.fromCharCode(b);
+    return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  }
+  /* How a fetched summary relates to what is displayed: 'same', 'older' (a stale copy; never go backwards) or 'new'. */
+  function relation(cur, s) {
+    if (!cur) return 'new';
+    const nv = s.report ? s.report.version : null;
+    if (cur.version && nv) { if (cur.version === nv) return 'same'; }
+    else if (cur.refreshed_at === s.refreshed_at) return 'same';
+    return Date.parse(s.refreshed_at) < Date.parse(cur.refreshed_at) ? 'older' : 'new';
+  }
+
+  function create(o) {
+    const cfg = { ...DEFAULTS, ...(o.options || {}) };
+    const base = o.base || '';
+    const setTimer = o.setTimer, clearTimer = o.clearTimer, now = o.now;
+    let running = false, timer = null, inFlight = false, failures = 0, mismatch = 0, lastStart = -Infinity;
+    const decode = (buf) => new TextDecoder('utf-8').decode(buf);
+
+    async function readBytes(url, init, limit) {
+      const ctl = new AbortController(); const t = setTimer(() => ctl.abort(), cfg.requestTimeoutMs);
+      try {
+        const r = await o.fetchFn(url, { ...init, signal: ctl.signal });
+        if (!r || !r.ok) throw new Error('HTTP ' + (r && r.status));
+        const buf = await r.arrayBuffer();
+        if (buf.byteLength > limit) throw new Error('response too large');
+        return buf;
+      } finally { clearTimer(t); }
+    }
+    async function once() {
+      // Revalidate with the server every time (the Pages cache header allows the browser to reuse a copy for 10 minutes): the
+      // browser sends its stored ETag and a 304 costs headers only. The address is the plain file, with no changing key, because
+      // a new key per check would leave the browser nothing to validate and force a full response each time. This cannot make
+      // a shared cache (CDN) hand over a newer file than it holds; the verification below is what protects what is displayed.
+      const sbuf = await readBytes(base + 'summary.json', { cache: 'no-cache' }, cfg.maxSummaryBytes);
+      let s; try { s = JSON.parse(decode(sbuf)); } catch (e) { return { kind: 'invalid', detail: 'summary is not valid JSON' }; }
+      const bad = checkSummary(s); if (bad) return { kind: 'invalid', detail: bad };
+      const rel = relation(o.getCurrent(), s);
+      if (rel === 'same') { if (s.report && o.adopt) o.adopt(s); return { kind: 'current' }; }
+      if (rel === 'older') return { kind: 'stale-response', detail: 'the server returned an older report than the one shown' };
+      // A new report: fetch its data by an address unique to that version, never stored by the browser until verified.
+      const key = s.report ? s.report.version : s.refreshed_at;
+      const dbuf = await readBytes(base + 'data.json?v=' + encodeURIComponent(key) + (mismatch ? '&r=' + mismatch : ''), { cache: 'no-store' }, cfg.maxDataBytes);
+      let d; try { d = JSON.parse(decode(dbuf)); } catch (e) { return { kind: 'mismatch', detail: 'data is not valid JSON' }; }
+      const version = s.report && o.subtle ? await versionOf(dbuf, o.subtle) : null;
+      const why = checkData(d, s, dbuf.byteLength, version);
+      if (why) return { kind: 'mismatch', detail: why };
+      try { o.apply(d, s); } catch (e) { return { kind: 'error', detail: 'the new report could not be displayed' }; }
+      return { kind: 'updated' };
+    }
+    function handle(out) {
+      const wasTrouble = failures >= cfg.failuresBeforeNotice;
+      if (out.kind === 'current' || out.kind === 'updated' || out.kind === 'stale-response') { failures = 0; mismatch = 0; }
+      else if (out.kind === 'mismatch') { mismatch += 1; if (mismatch > cfg.retryDelaysMs.length) { mismatch = 0; failures += 1; } }
+      else { failures += 1; mismatch = 0; }
+      const trouble = failures >= cfg.failuresBeforeNotice;
+      if (o.onStatus) o.onStatus({ kind: out.kind, detail: out.detail || '', failures, checkedAt: now(), trouble, noticeStarted: trouble && !wasTrouble, recovered: wasTrouble && !trouble });
+    }
+    function nextDelay() {
+      let ms;
+      if (mismatch > 0) ms = cfg.retryDelaysMs[mismatch - 1];
+      else if (failures > 0) ms = Math.min(cfg.intervalMs * 2 ** failures, cfg.maxBackoffMs);
+      else ms = cfg.intervalMs;
+      return Math.round(ms * (1 + (o.random() * 2 - 1) * cfg.jitter));
+    }
+    function schedule() {
+      if (timer !== null) { clearTimer(timer); timer = null; }
+      if (!running || !o.isVisible()) return;       // a hidden tab makes no requests
+      timer = setTimer(() => { timer = null; check(); }, nextDelay());
+    }
+    async function check() {
+      if (inFlight) return 'busy';                  // never two requests at once
+      inFlight = true; lastStart = now();
+      let out; try { out = await once(); } catch (e) { out = { kind: 'error', detail: (e && e.name === 'AbortError') ? 'the request timed out' : 'the request failed' }; }
+      inFlight = false;
+      handle(out); schedule();
+      return out.kind;
+    }
+    return {
+      start() { running = true; schedule(); },
+      stop() { running = false; if (timer !== null) { clearTimer(timer); timer = null; } },
+      checkNow() { return running ? check() : Promise.resolve('stopped'); },
+      visibilityChanged() {
+        if (!o.isVisible()) { if (timer !== null) { clearTimer(timer); timer = null; } return; }
+        if (running && timer === null && !inFlight) timer = setTimer(() => { timer = null; check(); }, Math.max(0, cfg.minGapMs - (now() - lastStart)));
+      },
+      state() { return { running, inFlight, scheduled: timer !== null, failures, mismatch }; },
+    };
+  }
+  return { create, versionOf, checkSummary, checkData, checkRow, relation, DEFAULTS, ROW_KEYS };
+})();
+/* BFF-POLL:END */
+</script>
+<script>
 /* Data layer: loads data.json and summary.json published with this page, derives the tables, holds filters. */
+/* BFF-DATA:BEGIN */
 window.dash = (() => {
   let LEADS = null, SUMMARY = null, state = 'loading';
-  const calcs = {}; const cache = {}; const subs = []; let params = {};
-  const run = () => { for (const [id, c] of Object.entries(calcs)) cache[id] = c.fn(...c.inputs.map((i) => (i === 'leads' ? LEADS : cache[i]))); };
+  const calcs = {}; let cache = {}; const subs = []; let params = {};
+  /* All derived tables for a set of rows, computed without touching what is on screen. */
+  const compute = (leads) => { const out = {}; for (const [id, c] of Object.entries(calcs)) out[id] = c.fn(...c.inputs.map((i) => (i === 'leads' ? leads : out[i]))); return out; };
   const fire = () => subs.forEach((f) => f());
   let t; window.addEventListener('resize', () => { clearTimeout(t); t = setTimeout(fire, 120); });
   const api = {
@@ -102,13 +262,23 @@ window.dash = (() => {
     setParams(p) { params = { ...params, ...p }; fire(); },
     resetParams() { params = {}; },
   };
+  /* Show a report. The new tables are computed first, so a failure leaves what is displayed exactly as it was; if drawing
+     fails after the swap, the previous report is put back. Filters (agent, period) live in `params` and are kept. */
+  function replace(rows, s) {
+    const prev = [LEADS, SUMMARY, cache, state];
+    const next = compute(rows);
+    LEADS = rows; SUMMARY = s; cache = next; state = 'ok';
+    try { fire(); } catch (e) { [LEADS, SUMMARY, cache, state] = prev; try { fire(); } catch (e2) { /* keep the original error */ } throw e; }
+    showMeta(s);
+  }
   Promise.all([fetch('data.json', { cache: 'no-store' }), fetch('summary.json', { cache: 'no-store' })])
     .then(async ([d, s]) => { if (!d.ok || !s.ok) throw new Error('HTTP ' + d.status + '/' + s.status); return [await d.json(), await s.json()]; })
     .then(([d, s]) => {
       if (!Array.isArray(d.rows) || d.refreshed_at !== s.refreshed_at) throw new Error('data and summary do not match');
-      LEADS = d.rows; SUMMARY = s; state = 'ok'; run(); fire(); showMeta(s);
+      replace(d.rows, s);
     })
-    .catch(() => { state = 'error'; fire(); showMeta(null); });
+    .catch(() => { state = 'error'; fire(); showMeta(null); })
+    .finally(() => startUpdates());
   function showMeta(s) {
     const el = document.querySelector('.w-refresh'); const st = document.getElementById('stale'); const w = document.getElementById('warnings');
     if (!s) {
@@ -117,22 +287,59 @@ window.dash = (() => {
       b.textContent = "The dashboard data couldn't be loaded. Reload the page; if it keeps failing, the last refresh may not have published.";
       document.querySelector('.tm').prepend(b); return;
     }
+    document.querySelectorAll('.tm-banner.err').forEach((b) => b.remove());      // a report has now loaded: clear any earlier failure notice
     const at = new Date(s.refreshed_at);
     el.textContent = 'data refreshed ' + at.toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' });
     const days = (Date.now() - at.getTime()) / 86400000;
     if (days > (s.stale_after_days || 14)) { st.hidden = false; st.textContent = `This data is ${Math.floor(days)} days old. Ask for a refresh to see current numbers.`; }
+    else { st.hidden = true; st.textContent = ''; }
     if (s.warnings && s.warnings.length) { w.hidden = false; w.replaceChildren(...s.warnings.map((x) => { const li = document.createElement('li'); li.textContent = x; return li; })); }
+    else { w.hidden = true; w.replaceChildren(); }
   }
+
+  /* Update messages. The visible line is not a live region (it changes at every check); the hidden status region speaks only
+     when something worth knowing happens: a new report, updates failing, updates working again. */
+  const shownAt = () => (SUMMARY ? new Date(SUMMARY.refreshed_at).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' }) : '');
+  function showUpdate(st) {
+    const line = document.getElementById('update-status'); const live = document.getElementById('update-live');
+    if (st.kind === 'updated') live.textContent = 'A newer report was loaded. Data refreshed ' + shownAt() + '.';
+    else if (st.noticeStarted) live.textContent = SUMMARY ? "Can't check for updates right now. Still showing the report from " + shownAt() + '.' : "Can't load the report right now. Trying again.";
+    else if (st.recovered) live.textContent = 'Updates are working again.';
+    if (st.trouble) {
+      line.className = 'tm-updates warn';
+      line.textContent = SUMMARY ? "Can't check for updates right now. Showing the report from " + shownAt() + '. Trying again automatically.' : "Can't load the report right now. Trying again automatically.";
+    } else {
+      line.className = 'tm-updates';
+      line.textContent = 'Checks for new reports automatically · last checked ' + new Date(st.checkedAt).toLocaleTimeString(undefined, { timeStyle: 'short' });
+    }
+  }
+  const poller = BffPoll.create({
+    fetchFn: (u, i) => fetch(u, i), now: () => Date.now(), setTimer: (f, ms) => setTimeout(f, ms), clearTimer: (t) => clearTimeout(t),
+    random: Math.random, subtle: (window.crypto && window.crypto.subtle) || null, isVisible: () => document.visibilityState !== 'hidden',
+    getCurrent: () => (SUMMARY ? { version: SUMMARY.report ? SUMMARY.report.version : null, refreshed_at: SUMMARY.refreshed_at } : null),
+    adopt: (s) => { if (SUMMARY && !SUMMARY.report) SUMMARY = { ...SUMMARY, report: s.report }; },   // an older page load learns its report's version
+    apply: (d, s) => replace(d.rows, s), onStatus: showUpdate,
+  });
+  function startUpdates() {
+    document.addEventListener('visibilitychange', () => poller.visibilityChanged());
+    window.addEventListener('online', () => poller.checkNow());
+    poller.start();
+    if (state === 'error') poller.checkNow();      // the first load failed: try again now rather than after a full interval
+  }
+  api.poller = poller;
   return api;
 })();
+/* BFF-DATA:END */
 </script>
 
+<div id="update-live" class="sr-only" role="status" aria-live="polite" aria-atomic="true"></div>
 
 <main class="tm">
   <header class="tm-head" id="overview">
     <div>
       <h1>Two Minute Transfers</h1>
       <p class="tm-sub" id="window">Last 300 paid leads · <span class="w-first">—</span> to <span class="w-last">—</span> · <span class="w-refresh">loading data…</span></p>
+      <p class="tm-updates" id="update-status">Checks for new reports automatically.</p>
       <p class="tm-stale" id="stale" hidden></p>
       <p class="tm-take" id="takeaway"><span class="t-closed">—</span> of <span class="t-leads">—</span> paid leads closed (<span class="t-rate">—</span>), <span class="t-debt">—</span> of debt enrolled. <span class="t-extra"></span></p>
     </div>
@@ -409,7 +616,8 @@ dash.onData(() => {
   }
   const rows = S.data.map((r) => ({ ...r }));
   const opts = ['All', ...rows.filter((r) => r.agent !== 'All').sort((a, b) => b.leads - a.leads).map((r) => r.agent)];
-  sel.replaceChildren(...opts.map((a) => new Option(a === 'All' ? 'All agents' : a, a)));
+  const sig = opts.join('\u0001');     // rebuild the list only when it changed, so an automatic refresh never closes an open dropdown
+  if (sel.dataset.sig !== sig) { sel.replaceChildren(...opts.map((a) => new Option(a === 'All' ? 'All agents' : a, a))); sel.dataset.sig = sig; }
   sel.value = opts.includes(agent) ? agent : 'All';
   const s = rows.find((r) => r.agent === sel.value) || rows[0];
   markWhere(root, 'agent=' + enc(s.agent));
