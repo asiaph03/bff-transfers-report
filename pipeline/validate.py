@@ -121,56 +121,86 @@ def check_baseline(rep: Report, summary: dict, baseline: dict | None, cfg: dict,
         rep.check(within, f"{m} change within limits", f"{old} -> {new}")
 
 
-def compare_ringcx(rep: Report, db: pd.DataFrame, sheet: pd.DataFrame, leads_db: pd.DataFrame,
-                   leads_sheet: pd.DataFrame, cfg: dict) -> dict:
-    """Database vs sheet RingCX, as counts only (no phones, names or rows are reported).
 
-    `db` and `sheet` are prepare_ringcx() outputs; the sheet is limited to the same date range the
-    database query uses. `leads_*` are match_agents() results for the same 300 leads.
+def check_pg_quality(rep: Report, diag: dict, rcx: pd.DataFrame, cfg: dict) -> None:
+    """Fail closed on database rows the rules cannot use; counts only. `rcx` is prepare_ringcx() output."""
+    acc = cfg["agent_match"]["accepted_result"]
+    rep.check(diag.get("missing_date", 1) == 0, "ringcx database: every row has a readable interaction date",
+              f"{diag.get('missing_date')} missing or unreadable")
+    rep.check(diag.get("missing_result", 1) == 0, "ringcx database: every row has a call result",
+              f"{diag.get('missing_result')} missing")
+    a = rcx[rcx["result"] == acc]
+    bad = int(((a["agent"] == "") | (a["phone"] == "")).sum())
+    rep.check(bad == 0, "ringcx database: every accepted call has an agent and a usable phone", f"{bad} without")
+    if diag.get("missing_call_ids"):
+        rep.warn(f"ringcx database: {diag['missing_call_ids']} row(s) without a call id (uii)")
+    if diag.get("repeated_call_ids"):
+        rep.warn(f"ringcx database: {diag['repeated_call_ids']} repeated call id(s) (uii)")
+
+
+def compare_ringcx(rep: Report, db: pd.DataFrame, sheet: pd.DataFrame, leads: pd.DataFrame, cfg: dict) -> dict:
+    """Database vs sheet RingCX over the dates both snapshots cover; any difference fails the run.
+
+    `db` and `sheet` are prepare_ringcx() outputs; `leads` are the selected leads before agent matching.
+    Calls dated after the earlier snapshot's last day are expected to differ (different load times) and are
+    only counted. Reports counts, dates and call-result labels only: no phones, names or rows.
     """
     from collections import Counter
 
+    from . import rules
+
     since = pd.Timestamp(cfg["agent_match"]["ringcx_log_start"])
-    sheet = sheet[sheet["date"] >= since]
     acc = cfg["agent_match"]["accepted_result"]
+    db, sheet = db[db["date"] >= since], sheet[sheet["date"] >= since]
+    if db.empty or sheet.empty:
+        rep.check(False, "ringcx database and sheet both have rows to compare", f"{len(db)} / {len(sheet)}")
+        return {}
+    end = min(db["date"].max(), sheet["date"].max())
+    late_db, late_sheet = int((db["date"] > end).sum()), int((sheet["date"] > end).sum())
+    db, sheet = db[db["date"] <= end], sheet[sheet["date"] <= end]
 
     def keys(d):
         return Counter(d["date"].astype(str) + "|" + d["result"].astype(str) + "|" + d["agent"].astype(str) + "|" + d["phone"].astype(str))
 
     a, b = keys(db), keys(sheet)
     only_db, only_sheet = sum((a - b).values()), sum((b - a).values())
+    res_db, res_sheet = db["result"].value_counts(), sheet["result"].value_counts()
+    res_diff = {k: int(res_db.get(k, 0) - res_sheet.get(k, 0)) for k in set(res_db.index) | set(res_sheet.index)
+                if res_db.get(k, 0) != res_sheet.get(k, 0)}
 
     def first_agents(d):
         x = d[d["result"] == acc].sort_values(["date", "_row"], kind="mergesort")
-        g = x.groupby(["phone", "date"])
-        multi = g["agent"].nunique()
-        multi = multi[multi > 1].index
-        return x.set_index(["phone", "date"]).loc[lambda t: t.index.isin(multi)].groupby(level=[0, 1])["agent"].first()
+        n = x.groupby(["phone", "date"])["agent"].nunique()
+        multi = set(n[n > 1].index)
+        x = x[[k in multi for k in zip(x["phone"], x["date"])]]
+        return x.groupby(["phone", "date"])["agent"].first()
 
     fa, fb = first_agents(db), first_agents(sheet)
     both = fa.index.intersection(fb.index)
     tie_diff = int((fa.loc[both] != fb.loc[both]).sum())
 
-    m = leads_db.set_index("phone")[["answered", "agent"]].join(
-        leads_sheet.set_index("phone")[["answered", "agent"]], rsuffix="_sheet")
+    la, lb = rules.match_agents(leads, db, cfg), rules.match_agents(leads, sheet, cfg)
+    m = la.set_index("phone")[["answered", "agent"]].join(lb.set_index("phone")[["answered", "agent"]], rsuffix="_sheet")
     ans_diff = int((m["answered"] != m["answered_sheet"]).sum())
     agent_diff = int((m["agent"] != m["agent_sheet"]).sum())
 
-    def span(d):
-        return f"{d['date'].min():%Y-%m-%d} to {d['date'].max():%Y-%m-%d}" if len(d) else "empty"
-
     facts = {
-        "ringcx rows database / sheet (same date range)": f"{len(db)} / {len(sheet)}",
-        "ringcx dates database / sheet": f"{span(db)} / {span(sheet)}",
+        "compared through": f"{end:%Y-%m-%d}",
+        "ringcx rows database / sheet": f"{len(db)} / {len(sheet)}",
+        "rows after the compared day database / sheet (snapshot timing)": f"{late_db} / {late_sheet}",
         "accepted calls database / sheet": f"{int((db['result'] == acc).sum())} / {int((sheet['result'] == acc).sum())}",
-        "calls only in database / only in sheet": f"{only_db} / {only_sheet}",
-        "same-day multi-agent ties decided differently": f"{tie_diff} of {len(both)}",
+        "distinct phones database / sheet": f"{db.loc[db['phone'] != '', 'phone'].nunique()} / {sheet.loc[sheet['phone'] != '', 'phone'].nunique()}",
+        "repeated identical calls database / sheet": f"{int(db.duplicated(['date', 'result', 'agent', 'phone']).sum())} / {int(sheet.duplicated(['date', 'result', 'agent', 'phone']).sum())}",
+        "same-day multi-agent ties (database order / sheet order differ)": f"{tie_diff} of {len(both)}",
         "leads with different answered / agent": f"{ans_diff} / {agent_diff}",
     }
-    if only_db or only_sheet:
-        rep.warn(f"RingCX database and sheet differ: {only_db} calls only in the database, {only_sheet} only in the sheet")
-    if tie_diff:
-        rep.warn(f"database order decides {tie_diff} same-day agent ties differently from sheet order")
-    if ans_diff or agent_diff:
-        rep.warn(f"{ans_diff} lead(s) answered differently and {agent_diff} with a different agent than with the sheet")
+    rep.check(only_db == 0 and only_sheet == 0, "ringcx database matches the sheet call for call",
+              f"{only_db} only in database, {only_sheet} only in sheet")
+    rep.check(not res_diff, "ringcx call-result totals match the sheet",
+              ", ".join(f"{k}: {v:+d}" for k, v in sorted(res_diff.items())))
+    rep.check(tie_diff == 0, "database order settles same-day agent ties as the sheet does", f"{tie_diff} of {len(both)} differ")
+    rep.check(ans_diff == 0 and agent_diff == 0, "agent attribution matches the sheet for every selected lead",
+              f"{ans_diff} answered and {agent_diff} agent differences")
+    if late_db or late_sheet:
+        rep.warn(f"RingCX snapshots end on different days; {late_db} database and {late_sheet} sheet row(s) after {end:%Y-%m-%d} not compared")
     return facts

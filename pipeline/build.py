@@ -64,15 +64,32 @@ def run(args) -> int:
     rep.check(True, "config is valid")
 
     try:
-        source = LocalSource(json.loads(Path(args.local_files).read_text())) if args.local_files else GoogleSheetsSource()
-        facts["source"] = "local exported copies (development)" if args.local_files else "Google Sheets (read-only)"
         rcx = cfg["sources"]["ringcx"]
         pg_source = None
+        if args.ringcx_backend == "postgres":
+            # Opt-in comparison run: preview only, always alongside the sheet.
+            rcx["backend"] = "postgres"
+            rcx["postgres"]["compare_with_sheets"] = True
         if rcx.get("backend") == "postgres":
+            from .pg import check_pg_config
+
+            problems = check_pg_config(rcx.get("postgres"))
+            if problems:
+                rep.check(False, "PostgreSQL RingCX mapping is complete", "; ".join(problems))
+                return finish(rep, facts, out, None)
+            pgc = rcx["postgres"]
+            if not args.preview and not pgc["approved_for_dashboard"]:
+                rep.check(False, "PostgreSQL RingCX source approved for the dashboard",
+                          "not approved: run with --preview to compare it with the sheet")
+                return finish(rep, facts, out, None)
+            if not (pgc["order_by_approved"] and pgc["approved_for_dashboard"]):
+                pgc["compare_with_sheets"] = True   # until approved, every database run is checked against the sheet
             from .pg import PostgresRingcxSource
 
             pg_source = PostgresRingcxSource(rcx["postgres"], rcx["columns"], cfg["agent_match"]["ringcx_log_start"])
             facts["ringcx source"] = f"PostgreSQL {rcx['postgres']['table']} (read-only)"
+        source = LocalSource(json.loads(Path(args.local_files).read_text())) if args.local_files else GoogleSheetsSource()
+        facts["source"] = "local exported copies (development)" if args.local_files else "Google Sheets (read-only)"
         tables, closed_tab_rows = read_all(cfg, source, pg_source)
         if pg_source is not None:
             facts.update({f"ringcx db {k.replace('_', ' ')}": v for k, v in pg_source.diag.items()})
@@ -99,12 +116,10 @@ def run(args) -> int:
     leads_before_match = leads
     leads = rules.match_agents(leads, ringcx, cfg)
     if pg_source is not None:
-        if pg_source.diag.get("duplicate_call_ids"):
-            rep.warn(f"ringcx database has {pg_source.diag['duplicate_call_ids']} repeated call id(s) in the reporting range")
+        validate.check_pg_quality(rep, pg_source.diag, ringcx, cfg)
         if "ringcx_sheet" in tables:
             sheet_rcx = rules.prepare_ringcx(tables["ringcx_sheet"], cfg)
-            facts.update(validate.compare_ringcx(rep, ringcx, sheet_rcx, leads,
-                                                 rules.match_agents(leads_before_match, sheet_rcx, cfg), cfg))
+            facts.update(validate.compare_ringcx(rep, ringcx, sheet_rcx, leads_before_match, cfg))
     crm = rules.prepare_lenders(tables, cfg)
     leads, excluded = rules.match_closes(leads, crm, cfg)
     validate.check_business(rep, leads, ringcx, excluded, cfg)
@@ -175,6 +190,8 @@ def main(argv=None) -> int:
     ap.add_argument("--local-files", help="development only: JSON map of source key -> exported file")
     ap.add_argument("--first-release", action="store_true", help="first approved publication only")
     ap.add_argument("--preview", action="store_true", help="preview build: a missing baseline is a warning, not a failure")
+    ap.add_argument("--ringcx-backend", choices=("config", "postgres"), default="config",
+                    help="postgres: read RingCX from the database and compare it with the sheet (preview only)")
     ap.add_argument("--check-config", action="store_true")
     args = ap.parse_args(argv)
     if args.check_config:

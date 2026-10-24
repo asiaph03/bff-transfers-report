@@ -7,7 +7,6 @@ Both return, per worksheet, a table of the requested columns in sheet order, plu
 """
 from __future__ import annotations
 
-import json
 import os
 import re
 from pathlib import Path

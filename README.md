@@ -42,21 +42,35 @@ Generated data is never committed. It exists only inside the workflow run and th
 | Forthcrm - Cordoba | Contacts | Closes, enrolled debt, submitted date (home or cell phone) |
 | Forthcrm - DebtBlue | ContactsV2 | Closes by stage and created date (no debt field) |
 
-### RingCX from PostgreSQL (prepared, not switched on)
+### RingCX from PostgreSQL (prepared, opt-in, not switched on)
 
-`sources.ringcx.backend` is `sheets` today. `pipeline/pg.py` can read RingCX from the BFF table `ringcx_inbound`
-instead, read-only: the session is read-only, every statement has a timeout, column names come only from the
-config and values are parameters. The table is maintained outside this project; the pipeline never writes to it.
+Google Sheets stays the RingCX source (`sources.ringcx.backend: sheets`). `pipeline/pg.py` can read the
+same calls from `public.ringcx_inbound`, a table maintained outside this project. The pipeline only reads it:
 
-To switch (only after approval):
+- read-only session in one REPEATABLE READ snapshot, statement timeout, row cap, rows read must equal the
+  snapshot count; column names come only from the config, values are bound parameters;
+- errors report the exception type and SQLSTATE only (no connection string, host or values);
+- rows come back under the sheet's column names, so every reporting rule runs unchanged;
+- data-quality checks fail the run on a missing interaction date or call result, or an accepted call
+  without an agent or phone; missing or repeated `uii` values are warnings (counts only).
 
-1. Run `docs/ringcx_inbound_inspection.sql` (read-only, aggregates only) and confirm the column mapping.
-2. Fill `sources.ringcx.postgres.columns` and an approved `order_by` that reproduces sheet order for the
-   same-day agent tie-break (U2).
-3. Add the repository secret `RINGCX_DATABASE_URL` with a read-only role's connection string.
-4. Set `backend: postgres` on the branch and run a preview. With `compare_with_sheets: true` the run also
-   reads the sheet and reports, as counts only, calls found in one source but not the other, ties decided
-   differently and leads whose answered/agent result would change.
+Mapping (from the owner's pgAdmin inspection): `interaction_date` = date, `call_result` = result,
+`agent_full_name` = agent, `ani` = phone, `uii` = candidate call id, `queue` = queue (filter
+`Two-Minute Transfers`), from 2026-04-01. `agent_email` is not used by any rule.
+
+**Open before switching:** the sheet's row order decides same-day agent ties (U2). The proposed stand-in is
+`ORDER BY interaction_date, uii` (`order_by_approved: false`); it is used only if a comparison shows it
+settles every tie the way the sheet does, and the owner approves.
+
+**Comparison run (preview only, nothing published):** Actions -> Refresh dashboard -> `mode: preview`,
+`ringcx_source: postgres-compare`. Needs the repository secret `RINGCX_DATABASE_URL` (read-only role) and a
+network path from GitHub Actions to the database. The run reads both sources and **fails** if, over the
+days both snapshots cover, any call is in one source only, call-result totals differ, a same-day tie is
+settled differently, or any selected lead's answered/agent result differs. Calls after the earlier
+snapshot's last day are counted as snapshot timing, not compared. A publish run refuses the database
+source until `approved_for_dashboard: true`.
+
+`docs/ringcx_inbound_inspection.sql` is a read-only, aggregates-only inspection script.
 
 ### Rules (all in `config/report.yaml`)
 
@@ -127,19 +141,25 @@ Actions → **Refresh dashboard** → Run workflow:
 - `first_release` is ticked only once, for the first approved publication, because no published baseline
   exists yet. It cannot override a failed check, and the run fails if a baseline already exists.
 
-### With Claude
+### With Claude ("Refresh the BFF Transfers dashboard now.")
 
-Say **"Refresh the BFF Transfers dashboard now."** Claude then:
+Manual only: nothing runs on a schedule or on a code, config or data change. Claude:
 
-1. Confirms the repository (`asiaph03/bff-transfers-report`) and branch (`main`).
-2. Checks that it can start workflows (GitHub CLI signed in on your computer) and that the two Google variables exist.
-3. Runs `gh workflow run refresh.yml -f mode=publish` and waits for it (`gh run watch`).
-4. Reads the job results and the validation report.
-5. Loads the live `summary.json` and checks its `refreshed_at` matches the run.
-6. Reports the refresh time, or what failed. It never says the dashboard was updated without that check.
-
-Claude needs the GitHub CLI signed in on your computer (`gh auth login`, done by you) with access to this
-repository. There is no Google key to handle.
+1. **Repository:** confirms `asiaph03/bff-transfers-report`, the branch the run will use (`main` for a
+   publish), that it matches GitHub, and that the working tree is clean.
+2. **Configuration and credentials, without revealing them:** `python -m pipeline.build --check-config`;
+   that the Google variables `GCP_WIF_PROVIDER` and `GCP_SERVICE_ACCOUNT` exist; and, only for a
+   PostgreSQL comparison, that the `RINGCX_DATABASE_URL` secret exists (name only).
+3. **Preview first:** starts (or asks you to start) Refresh dashboard with `mode: preview`. The run fetches
+   all sources read-only.
+4. **Source completeness:** row minimums, required columns, the lenders' Closed-tab cross-check and, for
+   the database, the snapshot count and data-quality checks.
+5. **Rules and output:** 300 unique paid leads, agent and close rules, approved fields only, totals,
+   privacy scan and the baseline limits.
+6. **Report only if every check passes:** otherwise no site is built and the live page is untouched.
+7. **Tells you:** the run id, sources read, row counts, what changed against the live totals, and warnings.
+8. **Publishes only after your explicit approval**, with `mode: publish` from `main`
+   (never `first_release` again: a baseline exists), then confirms the live `summary.json` matches the run.
 
 ## What is checked before publishing
 
@@ -185,6 +205,8 @@ not commit them.
 | `Google credentials not found` / Google sign-in step failed | Check the two repository variables (setup step 2) and the Workload Identity setup (step 1.4) |
 | `Google Sheets still unavailable ...` (HTTP 503/500/429) | Google could not serve that spreadsheet in time. Each request is logged with its status and duration. The RingCentral Call Logs file takes about 3 minutes per request; run again later. Nothing is published |
 | `Google refused the sign-in (401) even after refreshing it` or `could not be refreshed` | The Workload Identity setup or repository variables changed; check setup steps 1.4 and 2 |
+| `RINGCX_DATABASE_URL is not set` / `could not connect` / `query failed (QueryCanceled…)` | Database comparison only: check the secret, the network path and the 60 s timeout; the sheet path is unaffected |
+| `ringcx database matches the sheet…` / `…same-day agent ties…` failed | Investigate the named difference; do not switch sources or loosen checks until it is explained |
 | `permission denied: share the spreadsheet with … as Viewer` | Share that sheet with the service-account email |
 | `missing column(s)` / `used more than once` | A sheet's headers changed; update `columns` in the config after checking the change |
 | `unexpected lender statuses` | Decide whether the new status closes a deal; add it to `closed_statuses` or `known_non_closing_statuses` |

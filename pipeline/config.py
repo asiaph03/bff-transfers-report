@@ -57,7 +57,7 @@ def validate_config(cfg: dict) -> list[str]:
     rcx = src.get("ringcx") or {}
     backend = rcx.get("backend", "sheets")
     _need(backend in ("sheets", "postgres"), "sources.ringcx.backend must be sheets or postgres", e)
-    if backend == "postgres":
+    if backend == "postgres" or rcx.get("postgres") is not None:
         from .pg import check_pg_config
 
         e.extend(check_pg_config(rcx.get("postgres")))

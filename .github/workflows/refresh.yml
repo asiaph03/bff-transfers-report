@@ -14,6 +14,11 @@ on:
         description: "Only for the first approved publication (no published baseline exists yet)"
         type: boolean
         default: false
+      ringcx_source:
+        description: "RingCX source. postgres-compare reads public.ringcx_inbound read-only and compares it with the sheet (preview only)"
+        type: choice
+        options: [config, postgres-compare]
+        default: config
 
 permissions:
   contents: read
@@ -69,6 +74,11 @@ jobs:
           set -o pipefail
           FLAGS=""
           if [ "${{ inputs.mode }}" = "preview" ]; then FLAGS="--preview"; fi
+          if [ "${{ inputs.ringcx_source }}" = "postgres-compare" ]; then
+            if [ "${{ inputs.mode }}" != "preview" ]; then echo "postgres-compare is preview only"; exit 1; fi
+            if [ -z "$RINGCX_DATABASE_URL" ]; then echo "RINGCX_DATABASE_URL secret is not set"; exit 1; fi
+            FLAGS="$FLAGS --ringcx-backend postgres"
+          fi
           if [ "${{ inputs.first_release }}" = "true" ]; then
             if [ "${{ inputs.mode }}" != "publish" ]; then echo "first_release only applies to publish"; exit 1; fi
             FLAGS="$FLAGS --first-release"

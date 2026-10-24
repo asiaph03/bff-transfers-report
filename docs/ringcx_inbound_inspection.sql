@@ -41,4 +41,15 @@ SELECT count(*) AS rows, pg_size_pretty(pg_total_relation_size('ringcx_inbound')
 -- SELECT max(<date_col>) AS latest_call FROM ringcx_inbound;
 -- If the table has a loaded_at / created_at / updated_at column, also: SELECT max(that_column) FROM ringcx_inbound;
 
+-- 9. Row order for the same-day agent tie-break (counts only)
+-- 9a. Does interaction_date carry a time of day? (timestamp types only)
+-- SELECT count(*) FILTER (WHERE interaction_date::time <> '00:00') AS with_time, count(*) AS total
+--   FROM public.ringcx_inbound WHERE queue = 'Two-Minute Transfers' AND interaction_date >= '2026-04-01';
+-- 9b. Same-day accepted calls from one caller that share the same value of a candidate order column
+--     (run once per candidate, e.g. uii); 0 means that column orders every tie
+-- SELECT count(*) AS unresolved_ties FROM (
+--   SELECT ani, interaction_date::date, uii, count(*) FROM public.ringcx_inbound
+--   WHERE queue = 'Two-Minute Transfers' AND call_result = 'Inbound Accepted' AND interaction_date >= '2026-04-01'
+--   GROUP BY 1, 2, 3 HAVING count(*) > 1) t;
+
 ROLLBACK;

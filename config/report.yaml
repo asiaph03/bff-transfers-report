@@ -42,17 +42,20 @@ sources:
     backend: sheets
     postgres:
       dsn_env: RINGCX_DATABASE_URL   # GitHub secret holding a read-only connection string; never in this file
-      table: ringcx_inbound
-      columns:                       # database column for each field; null = not confirmed yet
-        date: null
-        result: null
-        agent: null
-        phone: null
-        call_id: null
-        queue: null
+      table: public.ringcx_inbound   # maintained outside this project; read only
+      columns:                       # from the owner's pgAdmin inspection (Oct 2026)
+        date: interaction_date
+        result: call_result
+        agent: agent_full_name
+        phone: ani
+        call_id: uii                 # candidate id; uniqueness and meaning still to be confirmed
+        queue: queue
       queue_value: Two-Minute Transfers
-      all_rows_are_queue: false      # true only if the table holds Two-Minute Transfers calls only
-      order_by: null                 # columns that reproduce sheet order for the same-day tie-break (U2); needs approval
+      all_rows_are_queue: false
+      order_by: [interaction_date, uii]   # PROPOSED stand-in for sheet order (U2); not approved
+      order_by_approved: false
+      approved_for_dashboard: false  # true only after a clean comparison and the owner's approval
+      timestamp_timezone: null       # needed only if interaction_date is a zone-aware timestamp
       statement_timeout_s: 60
       max_rows: 500000
       compare_with_sheets: true      # preview aid: also read the sheet and report differences (aggregates only)

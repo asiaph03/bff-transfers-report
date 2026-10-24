@@ -1,16 +1,22 @@
-"""Read-only RingCX source from the BFF PostgreSQL table (default: ringcx_inbound).
+"""Read-only RingCX source from the BFF PostgreSQL table public.ringcx_inbound.
 
-Only used when config sets sources.ringcx.backend: postgres. The database is never written to:
-the session is read-only, every statement has a timeout, identifiers come only from the validated
-config and values are passed as parameters. Errors are reported by type and SQLSTATE only, never with
-the connection string, host, credentials or row values.
+Opt-in only: used when the run asks for it (`--ringcx-backend postgres`, preview only) or when
+config sets sources.ringcx.backend: postgres after approval. The table is maintained outside this
+project; this module never writes to it.
 
-The returned table uses the same column names as the RingCX sheet (sources.ringcx.columns), so every
-reporting rule runs unchanged. `_row` is the position in the configured, approved ORDER BY, which takes
-the place of sheet row order for the same-day agent tie-break (U2).
+Safety: read-only session (default_transaction_read_only) in one REPEATABLE READ snapshot, a
+statement timeout on every query, identifiers only from the validated config, values only as bound
+parameters, a row cap, and a check that the rows read equal the snapshot count. Errors carry the
+exception type and SQLSTATE only, never the connection string, host, credentials or row values.
+
+The returned table uses the RingCX sheet's column names (sources.ringcx.columns) so every reporting
+rule runs unchanged. `_row` is the position in the configured ORDER BY, which stands in for sheet row
+order in the same-day agent tie-break (U2); that substitution must be shown to match before approval.
 """
 from __future__ import annotations
 
+import datetime as dt
+import decimal
 import os
 import re
 import time
@@ -31,7 +37,7 @@ def check_pg_config(pg: dict) -> list[str]:
     if not (isinstance(pg.get("dsn_env"), str) and IDENT.match(pg["dsn_env"])):
         e.append("sources.ringcx.postgres.dsn_env must be an environment variable name")
     table = pg.get("table")
-    if not (isinstance(table, str) and all(IDENT.match(p) for p in table.split(".")) and table.count(".") <= 1):
+    if not (isinstance(table, str) and table.count(".") <= 1 and all(IDENT.match(p) for p in table.split("."))):
         e.append("sources.ringcx.postgres.table must be table or schema.table")
     cols = pg.get("columns") or {}
     for f in FIELDS + ("call_id",):
@@ -46,10 +52,16 @@ def check_pg_config(pg: dict) -> list[str]:
         e.append("sources.ringcx.postgres: set columns.queue, or all_rows_are_queue: true once confirmed")
     ob = pg.get("order_by")
     if not (isinstance(ob, list) and ob and all(isinstance(c, str) and IDENT.match(c) for c in ob)):
-        e.append("sources.ringcx.postgres.order_by must be an approved list of columns (replaces sheet order, U2)")
+        e.append("sources.ringcx.postgres.order_by must be a list of columns (stands in for sheet order, U2)")
+    for k in ("order_by_approved", "approved_for_dashboard"):
+        if not isinstance(pg.get(k), bool):
+            e.append(f"sources.ringcx.postgres.{k} must be true or false")
+    tz = pg.get("timestamp_timezone")
+    if tz is not None and not (isinstance(tz, str) and re.match(r"^[A-Za-z_]+(/[A-Za-z_+-]+)*$", tz)):
+        e.append("sources.ringcx.postgres.timestamp_timezone must be an IANA name such as America/New_York, or null")
     for k, lo, hi in (("statement_timeout_s", 1, 600), ("max_rows", 1, 5_000_000)):
         v = pg.get(k)
-        if not (isinstance(v, int) and lo <= v <= hi):
+        if not (isinstance(v, int) and not isinstance(v, bool) and lo <= v <= hi):
             e.append(f"sources.ringcx.postgres.{k} must be an integer {lo}-{hi}")
     return e
 
@@ -67,12 +79,29 @@ def build_query(pg: dict, sheet_cols: dict):
     picks = [sql.SQL("{} AS {}").format(sql.Identifier(c[f]), sql.Identifier(sheet_cols[f])) for f in FIELDS]
     picks.append(sql.SQL("{} AS {}").format(sql.Identifier(c["call_id"]), sql.Identifier("_call_id")))
     order = sql.SQL(", ").join(sql.Identifier(x) for x in pg["order_by"])
-    count_sql = sql.SQL(
-        "SELECT count(*), count(DISTINCT {cid}), min({d}), max({d}) FROM {t} WHERE {w}"
-    ).format(cid=sql.Identifier(c["call_id"]), d=sql.Identifier(c["date"]), t=table, w=where_sql)
+    count_sql = sql.SQL("SELECT count(*) FROM {t} WHERE {w}").format(t=table, w=where_sql)
     rows_sql = sql.SQL("SELECT {p} FROM {t} WHERE {w} ORDER BY {o}").format(
         p=sql.SQL(", ").join(picks), t=table, w=where_sql, o=order)
     return count_sql, rows_sql
+
+
+def _plain_phone(v):
+    """Database numbers (numeric/bigint) as digit text, so 15551234567.0 does not gain a digit."""
+    if isinstance(v, decimal.Decimal):
+        return str(int(v)) if v == v.to_integral_value() else str(v)
+    if isinstance(v, float) and v.is_integer():
+        return str(int(v))
+    return v
+
+
+def _local_date_time(v, tz: str | None):
+    """Dates and naive timestamps pass through; zone-aware timestamps need the configured reporting zone."""
+    if isinstance(v, dt.datetime) and v.tzinfo is not None:
+        if not tz:
+            raise SourceError("ringcx database: interaction dates carry a time zone; set "
+                              "sources.ringcx.postgres.timestamp_timezone to the RingCX reporting zone")
+        return pd.Timestamp(v).tz_convert(tz).tz_localize(None).to_pydatetime()
+    return v
 
 
 class PostgresRingcxSource:
@@ -117,7 +146,7 @@ class PostgresRingcxSource:
             conn.read_only = True
             conn.isolation_level = psycopg.IsolationLevel.REPEATABLE_READ
             with conn.transaction():
-                n, n_ids, dmin, dmax = conn.execute(count_sql, params).fetchone()
+                n = conn.execute(count_sql, params).fetchone()[0]
                 if n > self.pg["max_rows"]:
                     raise SourceError(f"{where}: {n} rows exceed max_rows {self.pg['max_rows']}; not reading")
                 cur = conn.execute(rows_sql, params)
@@ -134,12 +163,33 @@ class PostgresRingcxSource:
                 pass
         if len(rows) != n:
             raise SourceError(f"{where}: read {len(rows)} rows but the snapshot count was {n}; not using a partial read")
+        expected = [self.sheet_cols[f] for f in FIELDS] + ["_call_id"]
+        if names != expected:
+            raise SourceError(f"{where}: unexpected result columns; not using it")
         df = pd.DataFrame(rows, columns=names)
-        for f in FIELDS:
-            if self.sheet_cols[f] not in df.columns:
-                raise SourceError(f"{where}: result is missing {self.sheet_cols[f]}")
+        d, p = self.sheet_cols["date"], self.sheet_cols["phone"]
+        df[d] = [_local_date_time(v, self.pg.get("timestamp_timezone")) for v in df[d]]
+        df[p] = [_plain_phone(v) for v in df[p]]
         df["_row"] = range(2, len(df) + 2)
-        self.diag = {"rows": n, "duplicate_call_ids": int(n - n_ids), "first_date": str(dmin)[:10] if dmin else None,
-                     "last_date": str(dmax)[:10] if dmax else None, "seconds": round(time.monotonic() - t0, 1)}
+        self.diag = self._quality(df)
+        self.diag["seconds"] = round(time.monotonic() - t0, 1)
         print(f"  {where}: {n} rows in {self.diag['seconds']}s ({self.diag['first_date']} to {self.diag['last_date']})", flush=True)
         return df
+
+    def _quality(self, df: pd.DataFrame) -> dict:
+        """Aggregate data-quality facts (counts and dates only; no values)."""
+        sc = self.sheet_cols
+        blank = lambda s: s.isna() | (s.astype(str).str.strip() == "")  # noqa: E731
+        ids = df["_call_id"]
+        dates = pd.to_datetime(df[sc["date"]], errors="coerce")
+        return {
+            "rows": len(df),
+            "first_date": f"{dates.min():%Y-%m-%d}" if dates.notna().any() else None,
+            "last_date": f"{dates.max():%Y-%m-%d}" if dates.notna().any() else None,
+            "missing_date": int(blank(df[sc["date"]]).sum() + (dates.isna() & ~blank(df[sc["date"]])).sum()),
+            "missing_result": int(blank(df[sc["result"]]).sum()),
+            "missing_agent": int(blank(df[sc["agent"]]).sum()),
+            "missing_phone": int(blank(df[sc["phone"]]).sum()),
+            "missing_call_ids": int(blank(ids).sum()),
+            "repeated_call_ids": int(ids[~blank(ids)].duplicated().sum()),
+        }
