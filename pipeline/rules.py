@@ -347,7 +347,7 @@ def _lender_rows_for_phones(df: pd.DataFrame, c: dict, key: str, p: dict, wanted
             first = ph
 
 
-def prepare_lenders(tables: dict[str, pd.DataFrame], cfg: dict, phones=None) -> pd.DataFrame:
+def prepare_lenders(tables: dict[str, pd.DataFrame], cfg: dict, phones=None, only=None) -> pd.DataFrame:
     """Every lender record with a usable phone, in lender order then sheet order, with its closed / active flags.
 
     `phones`, when given, is the set of normalised phone numbers the caller will match (the selected paid leads).
@@ -355,11 +355,16 @@ def prepare_lenders(tables: dict[str, pd.DataFrame], cfg: dict, phones=None) -> 
     same columns and values as the full table restricted to those phones, and a fresh 0..n-1 index instead of the
     full table's gapped one. `match_closes`, the only consumer, joins on phone with those leads, so its result
     does not depend on the other rows. Without `phones` the full table is built (the reference behaviour).
+
+    `only` limits the table to those lenders (default: all). Staged ingestion builds one lender at a time and joins
+    the pieces in lender order; every row is computed from its own record, so the joined pieces equal the full table.
     """
     p, le = cfg["phone"], cfg["lenders"]
     wanted = None if phones is None else {x for x in phones if isinstance(x, str) and x}
     frames = []
     for key in le["order"]:
+        if only is not None and key not in only:
+            continue
         df, c = tables[key], cfg["sources"][key]["columns"]
         if wanted is not None:
             frames.extend(_lender_rows_for_phones(df, c, key, p, wanted))
@@ -391,10 +396,12 @@ def prepare_lenders(tables: dict[str, pd.DataFrame], cfg: dict, phones=None) -> 
     return crm
 
 
-def unknown_statuses(tables: dict[str, pd.DataFrame], cfg: dict) -> dict[str, list[str]]:
-    """Statuses on file that are neither closing nor known non-closing (U8)."""
+def unknown_statuses(tables: dict[str, pd.DataFrame], cfg: dict, only=None) -> dict[str, list[str]]:
+    """Statuses on file that are neither closing nor known non-closing (U8). `only` limits it to those lenders."""
     le, out = cfg["lenders"], {}
     for key in le["order"]:
+        if only is not None and key not in only:
+            continue
         col = cfg["sources"][key]["columns"]["status"]
         seen = set(clean_text_series(tables[key][col]))
         known = set(le["closed_statuses"][key]) | set(le["known_non_closing_statuses"][key])
@@ -404,10 +411,13 @@ def unknown_statuses(tables: dict[str, pd.DataFrame], cfg: dict) -> dict[str, li
     return out
 
 
-def closed_status_rows(tables: dict[str, pd.DataFrame], cfg: dict) -> dict[str, int]:
-    """Rows on each lender tab whose status is on its closed list (compared with its Closed tab)."""
+def closed_status_rows(tables: dict[str, pd.DataFrame], cfg: dict, only=None) -> dict[str, int]:
+    """Rows on each lender tab whose status is on its closed list (compared with its Closed tab).
+    `only` limits it to those lenders."""
     out = {}
     for key in cfg["lenders"]["order"]:
+        if only is not None and key not in only:
+            continue
         col = cfg["sources"][key]["columns"]["status"]
         out[key] = int(clean_text_series(tables[key][col]).isin(set(cfg["lenders"]["closed_statuses"][key])).sum())
     return out

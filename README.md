@@ -237,6 +237,17 @@ the original implementation. Phones are still normalised, and close dates and de
 row, so an unreadable value anywhere still stops the run. Called without `phones` it builds the full table.
 It cut the memory a refresh needs beyond the loaded sheets by about four-fifths in the benchmarks.
 
+Staged ingestion (off by default). `ingest.staged: false` in `config/report.yaml` keeps today's flow: read all five
+sources, then calculate. Setting it to `true`, or running with `--ingest staged`, reads Ringba first, then RingCX,
+then each lender, and reduces each to what the report can still use (RingCX calls and lender records of the selected
+leads' phones) before the next is read, so only one source table is in memory at a time. Results are the same: the
+published files and the validation report's checks are identical (`pipeline/test_staged.py`, and the benchmark
+fingerprints against the release code up to 1,000,000 rows per source). At 1,000,000 rows per source the peak
+memory fell from about 1.6 GB to about 0.55 GB. Failures behave the same: a read error stops the run, and a run that
+cannot find enough paid leads still reads the other sources so its report lists the same checks. The closing-agent
+preview and the RingCX database comparison need the complete tables, so they use the default flow and the report
+says so (`staged ingestion: not used: ...`). `--ingest full` forces the default flow whatever the config says.
+
 To measure calculation time on made-up data (no Google access, no client data), from the repository root:
 
 ```

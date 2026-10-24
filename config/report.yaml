@@ -15,6 +15,11 @@ phone:
   digits: 10                     # match on the last N digits, all non-digits removed
   min_digits: 10                 # shorter numbers are treated as blank
 
+ingest:
+  # Peak-memory switch only; it never changes a result. false (default) reads all five sources, then calculates.
+  # true reads one source at a time and frees it before the next (pipeline/staged.py). Also: --ingest staged|full.
+  staged: false
+
 sources:
   ringba:
     spreadsheet_id: 1enoYbZv_cxx3C_ZrZYFU9rqfJTfwCRWfMF5kMJBpr4M

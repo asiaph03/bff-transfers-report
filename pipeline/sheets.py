@@ -270,6 +270,52 @@ class LocalSource:
         return sum(1 for r in rows if any(v not in (None, "") for v in list(r)[:5]))
 
 
+def _record(timings: dict | None, source, name: str, t0: float, r0: int, rows: int | None) -> None:
+    if timings is not None:
+        timings[name] = {"seconds": round(time.perf_counter() - t0, 2), "rows": rows,
+                         "retries": getattr(source, "retries", 0) - r0}
+
+
+def read_source(cfg: dict, key: str, s: dict, source, extra_columns: dict | None = None,
+                timings: dict | None = None, closed_counts: dict | None = None) -> pd.DataFrame:
+    """Read one configured worksheet, and for a lender its Closed tab row count (into `closed_counts[key]`).
+
+    This is the per-source step of read_all, unchanged: same columns, same prints, same timing records, same
+    errors. `key` names the table (and the timing); `s` is the source's configuration.
+    """
+    closed_counts = {} if closed_counts is None else closed_counts
+    cols = []
+    for v in s["columns"].values():
+        if v is None:
+            continue
+        cols.extend(v if isinstance(v, list) else [v])
+    cols = list(dict.fromkeys(cols + list((extra_columns or {}).get(key, []))))
+    print(f"reading {key} / {s['worksheet']} ({len(cols)} columns)", flush=True)
+    if hasattr(source, "start_source"):
+        source.start_source()
+    t0, r0, n = time.perf_counter(), getattr(source, "retries", 0), None
+    try:
+        if isinstance(source, LocalSource):
+            df = source.read_key("ringcx" if key == "ringcx_sheet" else key, s["worksheet"], cols)
+        else:
+            df = source.read(s["spreadsheet_id"], s["worksheet"], cols, whole_tab=bool(s.get("read_whole_tab")))
+        n = len(df)
+    finally:
+        _record(timings, source, key, t0, r0, n)
+    print(f"  {key}: {len(df)} rows", flush=True)
+    ct = s.get("closed_tab")
+    if ct and cfg["validation"].get("closed_tab_cross_check"):
+        t0, r0 = time.perf_counter(), getattr(source, "retries", 0)
+        try:
+            if isinstance(source, LocalSource):
+                closed_counts[key] = source.count_rows_key(key, ct["worksheet"], ct["has_header"])
+            else:
+                closed_counts[key] = source.count_rows(s["spreadsheet_id"], ct["worksheet"], ct["has_header"])
+        finally:
+            _record(timings, source, f"{key} closed tab", t0, r0, closed_counts.get(key))
+    return df
+
+
 def read_all(cfg: dict, source, pg_source=None, extra_columns: dict | None = None,
              timings: dict | None = None) -> tuple[dict[str, pd.DataFrame], dict[str, int]]:
     """Read every configured worksheet and each lender's Closed tab row count.
@@ -285,12 +331,6 @@ def read_all(cfg: dict, source, pg_source=None, extra_columns: dict | None = Non
     the sheet; with compare_with_sheets the sheet is also read, as tables["ringcx_sheet"], for comparison.
     """
     tables, closed_counts = {}, {}
-
-    def record(name: str, t0: float, r0: int, rows: int | None) -> None:
-        if timings is not None:
-            timings[name] = {"seconds": round(time.perf_counter() - t0, 2), "rows": rows,
-                             "retries": getattr(source, "retries", 0) - r0}
-
     for key, s in cfg["sources"].items():
         if key == "ringcx" and s.get("backend") == "postgres":
             print("reading ringcx / PostgreSQL (read-only)", flush=True)
@@ -301,39 +341,11 @@ def read_all(cfg: dict, source, pg_source=None, extra_columns: dict | None = Non
                 tables[key] = pg_source.read()
                 n = len(tables[key])
             finally:
-                record("ringcx (database)", t0, r0, n)
+                _record(timings, source, "ringcx (database)", t0, r0, n)
             if not (s.get("postgres") or {}).get("compare_with_sheets"):
                 continue
             key = "ringcx_sheet"
-        cols = []
-        for v in s["columns"].values():
-            if v is None:
-                continue
-            cols.extend(v if isinstance(v, list) else [v])
-        cols = list(dict.fromkeys(cols + list((extra_columns or {}).get(key, []))))
-        print(f"reading {key} / {s['worksheet']} ({len(cols)} columns)", flush=True)
-        if hasattr(source, "start_source"):
-            source.start_source()
-        t0, r0, n = time.perf_counter(), getattr(source, "retries", 0), None
-        try:
-            if isinstance(source, LocalSource):
-                tables[key] = source.read_key("ringcx" if key == "ringcx_sheet" else key, s["worksheet"], cols)
-            else:
-                tables[key] = source.read(s["spreadsheet_id"], s["worksheet"], cols, whole_tab=bool(s.get("read_whole_tab")))
-            n = len(tables[key])
-        finally:
-            record(key, t0, r0, n)
-        print(f"  {key}: {len(tables[key])} rows", flush=True)
-        ct = s.get("closed_tab")
-        if ct and cfg["validation"].get("closed_tab_cross_check"):
-            t0, r0 = time.perf_counter(), getattr(source, "retries", 0)
-            try:
-                if isinstance(source, LocalSource):
-                    closed_counts[key] = source.count_rows_key(key, ct["worksheet"], ct["has_header"])
-                else:
-                    closed_counts[key] = source.count_rows(s["spreadsheet_id"], ct["worksheet"], ct["has_header"])
-            finally:
-                record(f"{key} closed tab", t0, r0, closed_counts.get(key))
+        tables[key] = read_source(cfg, key, s, source, extra_columns, timings, closed_counts)
     return tables, closed_counts
 
 

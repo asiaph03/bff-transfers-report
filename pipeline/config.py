@@ -37,6 +37,10 @@ def validate_config(cfg: dict) -> list[str]:
     _need(isinstance(ph.get("digits"), int) and 7 <= ph.get("digits", 0) <= 15, "phone.digits must be 7-15", e)
     _need(isinstance(ph.get("min_digits"), int) and ph.get("min_digits", 0) >= ph.get("digits", 99), "phone.min_digits must be >= phone.digits", e)
 
+    ing = cfg.get("ingest")
+    if ing is not None:
+        _need(isinstance(ing, dict) and isinstance(ing.get("staged"), bool), "ingest.staged must be true or false", e)
+
     src = cfg.get("sources", {})
     for k in SOURCE_KEYS:
         s = src.get(k)

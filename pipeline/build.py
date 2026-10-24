@@ -22,6 +22,7 @@ import urllib.request
 from pathlib import Path
 
 from . import rules, validate
+from . import staged as staged_mod
 from .config import ConfigError, load_config
 from .sheets import GoogleSheetsSource, LocalSource, SourceError, assert_no_secret, read_all
 from .timing import StageTimer, peak_memory_mb
@@ -102,7 +103,20 @@ def run(args) -> int:
         ca = cfg.get("closing_agent")
         closer_on = bool(ca) and (ca["source"] == "lender" or args.closer_preview)
         extra = rules.lender_closer_columns(cfg) if closer_on else None
-        tables, closed_tab_rows = read_all(cfg, source, pg_source, extra_columns=extra, timings=fetch)
+        want = getattr(args, "ingest", "config")
+        use_staged = want == "staged" or (want == "config" and bool((cfg.get("ingest") or {}).get("staged")))
+        staged = None
+        if use_staged:
+            why_not = staged_mod.unavailable_reason(closer_on, pg_source is not None)
+            if why_not:
+                facts["staged ingestion"] = f"not used: {why_not}"
+            else:
+                facts["staged ingestion"] = "used: one source in memory at a time"
+                staged = staged_mod.ingest(cfg, source, extra_columns=extra, timings=fetch)
+        if staged is None:
+            tables, closed_tab_rows = read_all(cfg, source, pg_source, extra_columns=extra, timings=fetch)
+        else:
+            tables, closed_tab_rows = None, staged.closed_tab_rows
         timer.lap("read sources")
         if pg_source is not None:
             facts.update({f"ringcx db {k.replace('_', ' ')}": v for k, v in pg_source.diag.items()})
@@ -110,24 +124,36 @@ def run(args) -> int:
         rep.check(False, "all sources readable", str(e))
         return done(None)
     rep.check(True, "all five sources readable with required columns")
-    validate.check_sources(rep, tables, cfg)
-    validate.check_statuses(rep, rules.unknown_statuses(tables, cfg))
-    if closed_tab_rows:
-        validate.check_closed_tabs(rep, rules.closed_status_rows(tables, cfg), closed_tab_rows)
+    if staged is None:
+        validate.check_sources(rep, tables, cfg)
+        validate.check_statuses(rep, rules.unknown_statuses(tables, cfg))
+        if closed_tab_rows:
+            validate.check_closed_tabs(rep, rules.closed_status_rows(tables, cfg), closed_tab_rows)
+    else:   # the same checks, on numbers taken while each source was in memory (a range stands in for len(table))
+        validate.check_sources(rep, {k: range(n) for k, n in staged.sizes.items()}, cfg)
+        validate.check_statuses(rep, staged.unknown)
+        if closed_tab_rows:
+            validate.check_closed_tabs(rep, staged.closed_rows, closed_tab_rows)
     timer.lap("validate inputs")
 
-    ringba = rules.prepare_ringba(tables["ringba"], cfg)
-    try:
-        leads, diag = rules.select_paid_leads(ringba, cfg)
-    except rules.RuleError as e:
-        rep.check(False, "enough paid leads", str(e))
-        return done(None)
+    if staged is None:
+        ringba = rules.prepare_ringba(tables["ringba"], cfg)
+        try:
+            leads, diag = rules.select_paid_leads(ringba, cfg)
+        except rules.RuleError as e:
+            rep.check(False, "enough paid leads", str(e))
+            return done(None)
+    else:
+        if staged.rule_error:
+            rep.check(False, "enough paid leads", staged.rule_error)
+            return done(None)
+        leads, diag = staged.leads, staged.diag
     facts.update({k.replace("_", " "): v for k, v in diag.items()})
     rep.check(diag["paid_rows_unparsed_time"] <= cfg["validation"]["max_unparsed_paid_call_times"],
               "paid calls have readable call times", f"{diag['paid_rows_unparsed_time']} unreadable")
     timer.lap("parse ringba, select paid leads")
 
-    ringcx = rules.prepare_ringcx(tables["ringcx"], cfg)
+    ringcx = rules.prepare_ringcx(tables["ringcx"], cfg) if staged is None else staged.ringcx
     leads_before_match = leads
     leads = rules.match_agents(leads, ringcx, cfg)
     if pg_source is not None:
@@ -136,7 +162,8 @@ def run(args) -> int:
             sheet_rcx = rules.prepare_ringcx(tables["ringcx_sheet"], cfg)
             facts.update(validate.compare_ringcx(rep, ringcx, sheet_rcx, leads_before_match, cfg))
     timer.lap("parse ringcx, match agents")
-    crm = rules.prepare_lenders(tables, cfg, phones=leads["phone"])   # only records that can match a selected lead
+    crm = (rules.prepare_lenders(tables, cfg, phones=leads["phone"])   # only records that can match a selected lead
+           if staged is None else staged.crm)
     leads, excluded = rules.match_closes(leads, crm, cfg)
     timer.lap("parse lenders, match closes")
     ca = cfg.get("closing_agent")
@@ -157,7 +184,8 @@ def run(args) -> int:
     validate.check_business(rep, leads, ringcx, excluded, cfg)
 
     if cfg["validation"]["data_gaps"]["warn_months_without_calls"]:
-        gaps = rules.months_without_calls(ringba, leads["call_time"].min(), leads["call_time"].max())
+        gaps = (rules.months_without_calls(ringba, leads["call_time"].min(), leads["call_time"].max())
+                if staged is None else staged.gaps)
         if gaps:
             rep.warn(f"Ringba has no calls in {', '.join(gaps)} (inside the reporting window)")
 
@@ -254,6 +282,8 @@ def main(argv=None) -> int:
     ap.add_argument("--local-files", help="development only: JSON map of source key -> exported file")
     ap.add_argument("--first-release", action="store_true", help="first approved publication only")
     ap.add_argument("--preview", action="store_true", help="preview build: a missing baseline is a warning, not a failure")
+    ap.add_argument("--ingest", choices=("config", "full", "staged"), default="config",
+                    help="staged: read one source at a time (lower peak memory, same results); config: use ingest.staged")
     ap.add_argument("--ringcx-backend", choices=("config", "postgres"), default="config",
                     help="postgres: read RingCX from the database and compare it with the sheet (preview only)")
     ap.add_argument("--closer-preview", action="store_true",
