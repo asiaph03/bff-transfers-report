@@ -136,7 +136,7 @@ def run(args) -> int:
             sheet_rcx = rules.prepare_ringcx(tables["ringcx_sheet"], cfg)
             facts.update(validate.compare_ringcx(rep, ringcx, sheet_rcx, leads_before_match, cfg))
     timer.lap("parse ringcx, match agents")
-    crm = rules.prepare_lenders(tables, cfg)
+    crm = rules.prepare_lenders(tables, cfg, phones=leads["phone"])   # only records that can match a selected lead
     leads, excluded = rules.match_closes(leads, crm, cfg)
     timer.lap("parse lenders, match closes")
     ca = cfg.get("closing_agent")

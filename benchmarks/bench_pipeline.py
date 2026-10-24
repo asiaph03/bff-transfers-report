@@ -11,6 +11,11 @@ loaded source tables (as in a real refresh, where they are in memory after the r
 
 Every intermediate table and the published rows are fingerprinted, so a faster implementation can be shown
 to produce identical output, not just identical totals. --compare exits 1 on any difference.
+
+Switches for fair comparisons: --no-lender-filter builds the full lender table instead of only the selected
+leads' records (the full table can be compared with the filtered one only on those records, which is what the
+lenders_for_leads fingerprint covers; lenders_parsed exists only for the full table). --no-fingerprints skips
+the digests, which allocate memory of their own, so peak memory and timings are not distorted by them.
 """
 from __future__ import annotations
 
@@ -53,9 +58,16 @@ class Stages:
             self.seconds[name] = round(time.perf_counter() - t0, 4)
 
 
-def run_pipeline(tables: dict, cfg: dict) -> dict:
+def run_pipeline(tables: dict, cfg: dict, lender_filter: bool = True, fingerprints: bool = True) -> dict:
+    """lender_filter: pass the selected leads' phones to prepare_lenders (as pipeline.build does). Without it the
+    full lender table is built (the reference behaviour; also the only option for code that predates the filter).
+    fingerprints: False skips the digests, which allocate memory of their own, for clean memory measurements."""
     st, fp = Stages(), {}
     rep = validate.Report()
+
+    def fingerprint(name, fn):
+        if fingerprints:
+            fp[name] = fn()
 
     def check_inputs():
         validate.check_sources(rep, tables, cfg)
@@ -64,17 +76,20 @@ def run_pipeline(tables: dict, cfg: dict) -> dict:
 
     closed_rows = st.run("validate_inputs", check_inputs)
     ringba = st.run("parse_ringba", rules.prepare_ringba, tables["ringba"], cfg)
-    fp["ringba_parsed"] = digest(ringba)
+    fingerprint("ringba_parsed", lambda: digest(ringba))
     leads, diag = st.run("select_paid_leads", rules.select_paid_leads, ringba, cfg)
-    fp["leads_selected"] = digest(leads)
+    fingerprint("leads_selected", lambda: digest(leads))
     ringcx = st.run("parse_ringcx", rules.prepare_ringcx, tables["ringcx"], cfg)
-    fp["ringcx_parsed"] = digest(ringcx)
+    fingerprint("ringcx_parsed", lambda: digest(ringcx))
     leads = st.run("match_agents", rules.match_agents, leads, ringcx, cfg)
-    fp["leads_agents"] = digest(leads)
-    crm = st.run("parse_lenders", rules.prepare_lenders, tables, cfg)
-    fp["lenders_parsed"] = digest(crm)
+    fingerprint("leads_agents", lambda: digest(leads))
+    crm = st.run("parse_lenders", rules.prepare_lenders, tables, cfg, **({"phones": leads["phone"]} if lender_filter else {}))
+    # The full table and the filtered one can only be compared on the rows that can match a lead.
+    fingerprint("lenders_for_leads", lambda: digest(crm[crm["phone"].isin(set(leads["phone"]))]))
+    if not lender_filter:
+        fingerprint("lenders_parsed", lambda: digest(crm))
     leads, excluded = st.run("match_closes", rules.match_closes, leads, crm, cfg)
-    fp["leads_closes"] = digest(leads)
+    fingerprint("leads_closes", lambda: digest(leads))
 
     def checks():
         validate.check_business(rep, leads, ringcx, excluded, cfg)
@@ -91,17 +106,21 @@ def run_pipeline(tables: dict, cfg: dict) -> dict:
         return rows, totals
 
     rows, totals = st.run("publish_rows", publish)
-    fp["published_rows"] = text_digest(rows)
-    fp["totals"] = text_digest(totals)
-    fp["diagnostics"] = text_digest({"diag": diag, "gaps": gaps, "closed_status_rows": closed_rows,
-                                     "excluded": int(len(excluded))})
+    fingerprint("published_rows", lambda: text_digest(rows))
+    fingerprint("totals", lambda: text_digest(totals))
+    fingerprint("diagnostics", lambda: text_digest({"diag": diag, "gaps": gaps, "closed_status_rows": closed_rows,
+                                                    "excluded": int(len(excluded))}))
     return {"stages_s": st.seconds, "fingerprints": fp, "totals": totals, "diag": diag,
             "checks_failed": rep.failures, "warnings": rep.warnings}
 
 
 def compare(now: dict, ref: dict) -> list[str]:
-    diffs = [f"{k}: {ref['fingerprints'].get(k)} -> {v}" for k, v in now["fingerprints"].items()
-             if ref["fingerprints"].get(k) != v]
+    """Differences in every fingerprint both runs computed. The published rows must be among them."""
+    shared = [k for k in now["fingerprints"] if k in ref["fingerprints"]]
+    diffs = [f"{k}: {ref['fingerprints'][k]} -> {now['fingerprints'][k]}" for k in shared
+             if ref["fingerprints"][k] != now["fingerprints"][k]]
+    if "published_rows" not in shared:
+        diffs.append("no published-rows fingerprint to compare (was --no-fingerprints used?)")
     if now["totals"] != ref["totals"]:
         diffs.append("totals differ")
     if now["checks_failed"] != ref["checks_failed"]:
@@ -116,6 +135,8 @@ def main(argv=None) -> int:
     ap.add_argument("--label", default="run")
     ap.add_argument("--out", default=str(ROOT / "out" / "bench"))
     ap.add_argument("--compare", help="a result file from an earlier run; exit 1 if any fingerprint differs")
+    ap.add_argument("--no-lender-filter", action="store_true", help="build the full lender table (reference behaviour)")
+    ap.add_argument("--no-fingerprints", action="store_true", help="skip the digests, for memory measurements")
     a = ap.parse_args(argv)
     out = Path(a.out)
     with open(cache_path(a.rows, a.seed, out), "rb") as f:
@@ -123,10 +144,11 @@ def main(argv=None) -> int:
     mem_loaded = peak_memory_mb()
     cfg = load_config(ROOT / "config" / "report.yaml")
     t0 = time.perf_counter()
-    res = run_pipeline(tables, cfg)
+    res = run_pipeline(tables, cfg, lender_filter=not a.no_lender_filter, fingerprints=not a.no_fingerprints)
     total = round(time.perf_counter() - t0, 3)
     res.update({
-        "label": a.label, "rows_per_source": a.rows, "seed": a.seed, "calculation_total_s": total,
+        "label": a.label, "lender_filter_on": not a.no_lender_filter, "digests_on": not a.no_fingerprints,
+        "rows_per_source": a.rows, "seed": a.seed, "calculation_total_s": total,
         "peak_memory_mb_after_load": round(mem_loaded, 0) if mem_loaded else None,
         "peak_memory_mb": round(peak_memory_mb() or 0, 0) or None,
         "python": platform.python_version(), "pandas": pd.__version__, "platform": platform.platform(),

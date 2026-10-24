@@ -316,11 +316,54 @@ def match_agents(leads: pd.DataFrame, ringcx: pd.DataFrame, cfg: dict) -> pd.Dat
 
 # ---------- lenders ----------
 
-def prepare_lenders(tables: dict[str, pd.DataFrame], cfg: dict) -> pd.DataFrame:
+def _lender_rows_for_phones(df: pd.DataFrame, c: dict, key: str, p: dict, wanted: set):
+    """The rows prepare_lenders would build for one lender whose phone is in `wanted`, without building the rest.
+
+    Phones are normalised over every row, and close dates and debts are parsed over every row (they are compact
+    numbers, and a value that cannot be read stops the run wherever it sits, as before). Only the text columns,
+    which are what fill memory, are built for the kept rows. A second phone column drops numbers equal to the
+    first column's, as in the full table.
+    """
+    row = df["_row"].to_numpy()
+    close = parse_time_series(df[c["close_date"]]).to_numpy()
+    debt = parse_number_series(df[c["debt"]]).to_numpy() if c["debt"] else None
+    first = None
+    for col in c["phones"]:
+        ph = norm_phone_series(df[col], p["digits"], p["min_digits"]).to_numpy(dtype=object)
+        keep = pd.Series(ph).isin(wanted).to_numpy(dtype=bool)
+        if first is not None:
+            keep &= ph != first
+        idx = np.flatnonzero(keep)
+        yield pd.DataFrame({
+            "_row": row[idx],
+            "status": clean_text_series(df[c["status"]].iloc[idx]).to_numpy(dtype=object),
+            "close_date": close[idx],
+            "debt": debt[idx] if debt is not None else np.full(len(idx), np.nan),
+            "agent": clean_text_series(df[c["agent"]].iloc[idx]).to_numpy(dtype=object),
+            "phone": ph[idx],
+            "lender": key,
+        })
+        if first is None:
+            first = ph
+
+
+def prepare_lenders(tables: dict[str, pd.DataFrame], cfg: dict, phones=None) -> pd.DataFrame:
+    """Every lender record with a usable phone, in lender order then sheet order, with its closed / active flags.
+
+    `phones`, when given, is the set of normalised phone numbers the caller will match (the selected paid leads).
+    The table then holds only the records whose phone is in that set: the same rows, in the same order, with the
+    same columns and values as the full table restricted to those phones, and a fresh 0..n-1 index instead of the
+    full table's gapped one. `match_closes`, the only consumer, joins on phone with those leads, so its result
+    does not depend on the other rows. Without `phones` the full table is built (the reference behaviour).
+    """
     p, le = cfg["phone"], cfg["lenders"]
+    wanted = None if phones is None else {x for x in phones if isinstance(x, str) and x}
     frames = []
     for key in le["order"]:
         df, c = tables[key], cfg["sources"][key]["columns"]
+        if wanted is not None:
+            frames.extend(_lender_rows_for_phones(df, c, key, p, wanted))
+            continue
         base = pd.DataFrame({
             "_row": df["_row"].values,
             "status": clean_text_series(df[c["status"]]).values,

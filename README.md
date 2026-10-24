@@ -228,6 +228,15 @@ Dates, phone numbers, text, numbers and booleans are parsed a column at a time (
 `pipeline/rules.py`). The one-value functions beside them define the rules; `pipeline/test_vectorized.py`
 holds the column versions to exactly the same answers, including odd values.
 
+Lender records are read for the selected paid leads only. `prepare_lenders(tables, cfg, phones=...)` returns
+just the records whose phone is one of the selected leads' phones, instead of one row per lender record. Those
+are the same rows, in the same order, with the same columns and values as the full table restricted to those
+phones (only the row index differs: 0..n-1 instead of gapped). `match_closes` joins that table to the leads on
+phone, so its result, and everything published, is unchanged; the tests prove it against the full table and
+the original implementation. Phones are still normalised, and close dates and debts still parsed, over every
+row, so an unreadable value anywhere still stops the run. Called without `phones` it builds the full table.
+It cut the memory a refresh needs beyond the loaded sheets by about four-fifths in the benchmarks.
+
 To measure calculation time on made-up data (no Google access, no client data), from the repository root:
 
 ```
