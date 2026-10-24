@@ -45,6 +45,5 @@ Debt Blue; Flux, ResolveFlux and IPLFCitizens appear only in older rows.
 
 One SI row is dated 2027-05-07. Its MONTH is "May", its expected ACH date is in June 2026, and the rows on
 either side in sheet order are dated late April to mid May 2026, so it reads as a year typo for 2026-05-07. It
-does **not** match any of the dashboard's closed deals. The preview never uses a ledger row dated after the run
-date ("invalid_date") and does not correct it.
+does **not** match any of the dashboard's closed deals. It was not corrected.
 
