@@ -152,7 +152,8 @@ Repository → Settings → Secrets and variables → Actions → **Variables** 
 ### 3. GitHub Pages source (only when the first release is approved)
 
 Settings → Pages → Build and deployment → Source: **GitHub Actions**. The URL does not change.
-Until this is switched, the old `index.html` in the repository root stays live.
+Done: the site has been served from the Actions build since 24 Oct 2026, so the old static `index.html` that
+used to sit in the repository root was removed (older copies remain in Git history).
 
 ## Refreshing the dashboard
 
