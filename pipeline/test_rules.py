@@ -512,3 +512,181 @@ def test_error_log_masks_long_numbers_and_never_prints_tokens(capsys):
     src.read("sheet-id", TAB, ["ANI"], whole_tab=True)
     out = capsys.readouterr().out
     assert "5550100001" not in out and "row # unavailable" in out and "Bearer" not in out and "HTTP 503" in out
+
+
+# ---- PostgreSQL RingCX source: fake connection only (no database, no real data) ----
+from pipeline import pg as pgmod  # noqa: E402
+
+SHEET_COLS = {"date": "Date", "result": "Call Result", "agent": "Agent Full Name", "phone": "ANI"}
+
+
+def pg_cfg(**over):
+    c = {"dsn_env": "RINGCX_DATABASE_URL", "table": "ringcx_inbound",
+         "columns": {"date": "call_date", "result": "call_result", "agent": "agent_name", "phone": "ani",
+                     "call_id": "uii", "queue": "queue"},
+         "queue_value": "Two-Minute Transfers", "all_rows_are_queue": False, "order_by": ["call_start", "uii"],
+         "statement_timeout_s": 60, "max_rows": 1000, "compare_with_sheets": False}
+    c.update(over)
+    return c
+
+
+class _Cur:
+    def __init__(self, rows, names):
+        self._rows = rows
+        self.description = [type("D", (), {"name": n})() for n in names]
+
+    def fetchone(self):
+        return self._rows[0]
+
+    def fetchall(self):
+        return self._rows
+
+
+class FakeConn:
+    """Answers the count query, then the rows query; records SQL, params and connection options."""
+
+    def __init__(self, rows, count=None, ids=None, fail_on=None):
+        self.rows, self.count, self.ids, self.fail_on = rows, count, ids, fail_on
+        self.sql, self.params, self.closed, self.read_only = [], [], False, None
+
+    def transaction(self):
+        import contextlib
+
+        return contextlib.nullcontext()
+
+    def execute(self, q, params):
+        import psycopg
+
+        text = q.as_string(None)
+        self.sql.append(text)
+        self.params.append(params)
+        if self.fail_on and self.fail_on in text:
+            raise psycopg.errors.QueryCanceled("canceling statement due to statement timeout (secret host db.example)")
+        if text.startswith("SELECT count("):
+            n = len(self.rows) if self.count is None else self.count
+            ids = n if self.ids is None else self.ids
+            dates = [r[0] for r in self.rows] or [None]
+            return _Cur([(n, ids, min(dates) if self.rows else None, max(dates) if self.rows else None)], ["c"])
+        return _Cur(self.rows, ["Date", "Call Result", "Agent Full Name", "ANI", "_call_id"])
+
+    def close(self):
+        self.closed = True
+
+
+def pg_source(conn, monkeypatch, cfg=None, env="postgresql://user:secret@db.example/bff"):
+    monkeypatch.setenv("RINGCX_DATABASE_URL", env)
+    opened = {}
+
+    def connect(dsn, **kw):
+        opened.update(kw)
+        return conn
+
+    src = pgmod.PostgresRingcxSource(cfg or pg_cfg(), SHEET_COLS, _dt.date(2026, 4, 1), connect=connect)
+    return src, opened
+
+
+DB_ROWS = [(_dt.datetime(2026, 5, 10, 9, 5), "Inbound Accepted", "First Agent", "1" + fake_phone(1), "U1"),
+           (_dt.datetime(2026, 5, 10, 9, 40), "Inbound Accepted", "Second Agent", "1" + fake_phone(1), "U2")]
+
+
+def test_pg_config_requires_confirmed_mapping_and_order():
+    import yaml
+
+    shipped = yaml.safe_load(CFG_PATH.read_text())["sources"]["ringcx"]
+    assert shipped["backend"] == "sheets"                          # nothing switched yet
+    problems = pgmod.check_pg_config(shipped["postgres"])
+    assert any("columns.date" in p for p in problems) and any("order_by" in p for p in problems)
+    assert pgmod.check_pg_config(pg_cfg()) == []
+    bad = pg_cfg(columns={**pg_cfg()["columns"], "date": "call_date; DROP TABLE x"})
+    assert any("columns.date" in p for p in pgmod.check_pg_config(bad))
+    assert any("table" in p for p in pgmod.check_pg_config(pg_cfg(table="a.b.c")))
+
+
+def test_pg_query_is_read_only_bounded_parameterised_and_ordered(monkeypatch):
+    conn = FakeConn(DB_ROWS)
+    src, opened = pg_source(conn, monkeypatch)
+    df = src.read()
+    assert "default_transaction_read_only=on" in opened["options"] and "statement_timeout=60000" in opened["options"]
+    assert conn.read_only is True and conn.closed
+    rows_sql = conn.sql[1]
+    assert rows_sql.startswith('SELECT "call_date" AS "Date"') and 'ORDER BY "call_start", "uii"' in rows_sql
+    assert "%(since)s" in rows_sql and "%(queue)s" in rows_sql and "Two-Minute" not in rows_sql   # values are parameters
+    assert conn.params[1] == {"since": _dt.date(2026, 4, 1), "queue": "Two-Minute Transfers"}
+    assert not any(w in " ".join(conn.sql).upper() for w in ("INSERT", "UPDATE", "DELETE", "TRUNCATE", "ALTER", "CREATE", "DROP"))
+    assert list(df["Agent Full Name"]) == ["First Agent", "Second Agent"] and list(df["_row"]) == [2, 3]
+
+
+def test_pg_rows_drive_the_same_rules_and_tie_break(cfg, monkeypatch):
+    src, _ = pg_source(FakeConn(DB_ROWS), monkeypatch)
+    rcx_db = rules.prepare_ringcx(src.read(), cfg)
+    L = leads_from(cfg, [("a", "2026-05-10 08:00", fake_phone(1), 32), ("b", "2026-05-11 10:00", fake_phone(2), 32),
+                         ("c", "2026-05-12 10:00", fake_phone(3), 32)])[0]
+    out = rules.match_agents(L, rcx_db, cfg).set_index("phone")
+    assert out.loc[fake_phone(1), "agent"] == "First Agent"         # first in the approved order wins
+    assert out.loc[fake_phone(2), "agent"] == cfg["agent_match"]["label_not_answered"]
+
+
+def test_pg_empty_result_is_valid_and_caught_by_min_rows(cfg, monkeypatch):
+    src, _ = pg_source(FakeConn([]), monkeypatch)
+    df = src.read()
+    assert len(df) == 0 and {"Date", "ANI"} <= set(df.columns)
+    rep = validate.Report()
+    validate.check_sources(rep, {"ringcx": df}, {"sources": {"ringcx": {"min_rows": 500}}})
+    assert not rep.ok
+
+
+def test_pg_duplicate_ids_are_reported(monkeypatch):
+    src, _ = pg_source(FakeConn(DB_ROWS, ids=1), monkeypatch)
+    src.read()
+    assert src.diag["duplicate_call_ids"] == 1
+
+
+def test_pg_partial_read_and_row_cap_fail(monkeypatch):
+    src, _ = pg_source(FakeConn(DB_ROWS, count=3), monkeypatch)
+    with pytest.raises(SourceError, match="partial read"):
+        src.read()
+    src, _ = pg_source(FakeConn(DB_ROWS, count=5000), monkeypatch)
+    with pytest.raises(SourceError, match="exceed max_rows"):
+        src.read()
+
+
+def test_pg_connection_and_query_failures_are_sanitised(monkeypatch):
+    import psycopg
+
+    monkeypatch.delenv("RINGCX_DATABASE_URL", raising=False)
+    src = pgmod.PostgresRingcxSource(pg_cfg(), SHEET_COLS, _dt.date(2026, 4, 1), connect=lambda *a, **k: None)
+    with pytest.raises(SourceError, match="RINGCX_DATABASE_URL is not set"):
+        src.read()
+
+    def refuse(dsn, **kw):
+        raise psycopg.OperationalError("connection to server at db.example failed: password authentication failed for user bob")
+
+    monkeypatch.setenv("RINGCX_DATABASE_URL", "postgresql://bob:secret@db.example/bff")
+    src = pgmod.PostgresRingcxSource(pg_cfg(), SHEET_COLS, _dt.date(2026, 4, 1), connect=refuse)
+    with pytest.raises(SourceError) as e:
+        src.read()
+    assert "could not connect" in str(e.value) and "secret" not in str(e.value) and "db.example" not in str(e.value)
+
+    conn = FakeConn(DB_ROWS, fail_on="ORDER BY")
+    src, _ = pg_source(conn, monkeypatch)
+    with pytest.raises(SourceError) as e:
+        src.read()
+    assert "query failed (QueryCanceled" in str(e.value) and "db.example" not in str(e.value) and conn.closed
+
+
+def test_compare_ringcx_reports_counts_only(cfg):
+    base = pd.DataFrame({"_row": [2, 3, 4], "date": pd.to_datetime(["2026-05-10"] * 3),
+                         "result": ["Inbound Accepted"] * 3, "agent": ["A", "B", "C"],
+                         "phone": [fake_phone(1), fake_phone(1), fake_phone(2)]})
+    L = leads_from(cfg, [("a", "2026-05-10 08:00", fake_phone(1), 32), ("b", "2026-05-10 09:00", fake_phone(2), 32),
+                         ("c", "2026-05-12 10:00", fake_phone(3), 32)])[0]
+    same = rules.match_agents(L, base, cfg)
+    rep = validate.Report()
+    facts = validate.compare_ringcx(rep, base, base, same, same, cfg)
+    assert facts["calls only in database / only in sheet"] == "0 / 0" and not rep.warnings
+    flipped = base.assign(_row=[3, 2, 4])                            # database orders the tie the other way
+    rep = validate.Report()
+    facts = validate.compare_ringcx(rep, flipped, base, rules.match_agents(L, flipped, cfg), same, cfg)
+    assert facts["same-day multi-agent ties decided differently"] == "1 of 1"
+    assert facts["leads with different answered / agent"] == "0 / 1"
+    assert all(fake_phone(1) not in str(v) for v in facts.values())

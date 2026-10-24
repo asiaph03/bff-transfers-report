@@ -66,7 +66,16 @@ def run(args) -> int:
     try:
         source = LocalSource(json.loads(Path(args.local_files).read_text())) if args.local_files else GoogleSheetsSource()
         facts["source"] = "local exported copies (development)" if args.local_files else "Google Sheets (read-only)"
-        tables, closed_tab_rows = read_all(cfg, source)
+        rcx = cfg["sources"]["ringcx"]
+        pg_source = None
+        if rcx.get("backend") == "postgres":
+            from .pg import PostgresRingcxSource
+
+            pg_source = PostgresRingcxSource(rcx["postgres"], rcx["columns"], cfg["agent_match"]["ringcx_log_start"])
+            facts["ringcx source"] = f"PostgreSQL {rcx['postgres']['table']} (read-only)"
+        tables, closed_tab_rows = read_all(cfg, source, pg_source)
+        if pg_source is not None:
+            facts.update({f"ringcx db {k.replace('_', ' ')}": v for k, v in pg_source.diag.items()})
     except SourceError as e:
         rep.check(False, "all sources readable", str(e))
         return finish(rep, facts, out, None)
@@ -87,7 +96,15 @@ def run(args) -> int:
               "paid calls have readable call times", f"{diag['paid_rows_unparsed_time']} unreadable")
 
     ringcx = rules.prepare_ringcx(tables["ringcx"], cfg)
+    leads_before_match = leads
     leads = rules.match_agents(leads, ringcx, cfg)
+    if pg_source is not None:
+        if pg_source.diag.get("duplicate_call_ids"):
+            rep.warn(f"ringcx database has {pg_source.diag['duplicate_call_ids']} repeated call id(s) in the reporting range")
+        if "ringcx_sheet" in tables:
+            sheet_rcx = rules.prepare_ringcx(tables["ringcx_sheet"], cfg)
+            facts.update(validate.compare_ringcx(rep, ringcx, sheet_rcx, leads,
+                                                 rules.match_agents(leads_before_match, sheet_rcx, cfg), cfg))
     crm = rules.prepare_lenders(tables, cfg)
     leads, excluded = rules.match_closes(leads, crm, cfg)
     validate.check_business(rep, leads, ringcx, excluded, cfg)

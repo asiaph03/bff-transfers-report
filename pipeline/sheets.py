@@ -268,10 +268,22 @@ class LocalSource:
         return sum(1 for r in rows if any(v not in (None, "") for v in list(r)[:5]))
 
 
-def read_all(cfg: dict, source) -> tuple[dict[str, pd.DataFrame], dict[str, int]]:
-    """Read every configured worksheet and each lender's Closed tab row count."""
+def read_all(cfg: dict, source, pg_source=None) -> tuple[dict[str, pd.DataFrame], dict[str, int]]:
+    """Read every configured worksheet and each lender's Closed tab row count.
+
+    With sources.ringcx.backend: postgres, RingCX comes from `pg_source` (read-only database) instead of
+    the sheet; with compare_with_sheets the sheet is also read, as tables["ringcx_sheet"], for comparison.
+    """
     tables, closed_counts = {}, {}
     for key, s in cfg["sources"].items():
+        if key == "ringcx" and s.get("backend") == "postgres":
+            print("reading ringcx / PostgreSQL (read-only)", flush=True)
+            if pg_source is None:
+                raise SourceError("ringcx: backend is postgres but no database source was set up")
+            tables[key] = pg_source.read()
+            if not (s.get("postgres") or {}).get("compare_with_sheets"):
+                continue
+            key = "ringcx_sheet"
         cols = []
         for v in s["columns"].values():
             if v is None:
@@ -281,7 +293,7 @@ def read_all(cfg: dict, source) -> tuple[dict[str, pd.DataFrame], dict[str, int]
         if hasattr(source, "start_source"):
             source.start_source()
         if isinstance(source, LocalSource):
-            tables[key] = source.read_key(key, s["worksheet"], cols)
+            tables[key] = source.read_key("ringcx" if key == "ringcx_sheet" else key, s["worksheet"], cols)
         else:
             tables[key] = source.read(s["spreadsheet_id"], s["worksheet"], cols, whole_tab=bool(s.get("read_whole_tab")))
         print(f"  {key}: {len(tables[key])} rows", flush=True)

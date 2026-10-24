@@ -54,6 +54,14 @@ def validate_config(cfg: dict) -> list[str]:
             _need(cols.get("debt") is None or isinstance(cols.get("debt"), str), f"sources.{k}.columns.debt must be a column name or null", e)
         _need(isinstance(s.get("min_rows"), int) and s.get("min_rows", -1) >= 0, f"sources.{k}.min_rows must be a non-negative integer", e)
 
+    rcx = src.get("ringcx") or {}
+    backend = rcx.get("backend", "sheets")
+    _need(backend in ("sheets", "postgres"), "sources.ringcx.backend must be sheets or postgres", e)
+    if backend == "postgres":
+        from .pg import check_pg_config
+
+        e.extend(check_pg_config(rcx.get("postgres")))
+
     pl = cfg.get("paid_leads", {})
     _need(isinstance(pl.get("min_payout_exclusive"), (int, float)), "paid_leads.min_payout_exclusive must be a number", e)
     _need(pl.get("dedupe") == "latest_paid_call_per_phone", "paid_leads.dedupe must be latest_paid_call_per_phone", e)

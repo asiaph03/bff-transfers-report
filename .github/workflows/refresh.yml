@@ -63,6 +63,8 @@ jobs:
       - name: Fetch Google Sheets, calculate, validate
         env:
           GOOGLE_SERVICE_ACCOUNT: ${{ vars.GCP_SERVICE_ACCOUNT }}
+          # Read-only connection string, used only when sources.ringcx.backend is postgres. Never printed.
+          RINGCX_DATABASE_URL: ${{ secrets.RINGCX_DATABASE_URL }}
         run: |
           set -o pipefail
           FLAGS=""

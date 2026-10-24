@@ -37,6 +37,25 @@ sources:
       phone: ANI
     min_rows: 500
     read_whole_tab: true         # small tab on a slow spreadsheet: one request instead of two
+    # Where RingCX rows come from. "sheets" (current, approved) or "postgres" (the BFF table
+    # ringcx_inbound, read-only). Switching needs the column mapping and order_by below confirmed and approved.
+    backend: sheets
+    postgres:
+      dsn_env: RINGCX_DATABASE_URL   # GitHub secret holding a read-only connection string; never in this file
+      table: ringcx_inbound
+      columns:                       # database column for each field; null = not confirmed yet
+        date: null
+        result: null
+        agent: null
+        phone: null
+        call_id: null
+        queue: null
+      queue_value: Two-Minute Transfers
+      all_rows_are_queue: false      # true only if the table holds Two-Minute Transfers calls only
+      order_by: null                 # columns that reproduce sheet order for the same-day tie-break (U2); needs approval
+      statement_timeout_s: 60
+      max_rows: 500000
+      compare_with_sheets: true      # preview aid: also read the sheet and report differences (aggregates only)
   citizen:
     spreadsheet_id: 1URGPKj596-RKXXHTB8o3JoYkaEen-Q2O4EVSTxwvoM8
     worksheet: Affiliate_Clients

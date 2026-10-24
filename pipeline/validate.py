@@ -119,3 +119,58 @@ def check_baseline(rep: Report, summary: dict, baseline: dict | None, cfg: dict,
         pct = diff / old if old else (0 if diff == 0 else float("inf"))
         within = diff <= t["max_abs_change"] or pct <= t["max_pct_change"]
         rep.check(within, f"{m} change within limits", f"{old} -> {new}")
+
+
+def compare_ringcx(rep: Report, db: pd.DataFrame, sheet: pd.DataFrame, leads_db: pd.DataFrame,
+                   leads_sheet: pd.DataFrame, cfg: dict) -> dict:
+    """Database vs sheet RingCX, as counts only (no phones, names or rows are reported).
+
+    `db` and `sheet` are prepare_ringcx() outputs; the sheet is limited to the same date range the
+    database query uses. `leads_*` are match_agents() results for the same 300 leads.
+    """
+    from collections import Counter
+
+    since = pd.Timestamp(cfg["agent_match"]["ringcx_log_start"])
+    sheet = sheet[sheet["date"] >= since]
+    acc = cfg["agent_match"]["accepted_result"]
+
+    def keys(d):
+        return Counter(d["date"].astype(str) + "|" + d["result"].astype(str) + "|" + d["agent"].astype(str) + "|" + d["phone"].astype(str))
+
+    a, b = keys(db), keys(sheet)
+    only_db, only_sheet = sum((a - b).values()), sum((b - a).values())
+
+    def first_agents(d):
+        x = d[d["result"] == acc].sort_values(["date", "_row"], kind="mergesort")
+        g = x.groupby(["phone", "date"])
+        multi = g["agent"].nunique()
+        multi = multi[multi > 1].index
+        return x.set_index(["phone", "date"]).loc[lambda t: t.index.isin(multi)].groupby(level=[0, 1])["agent"].first()
+
+    fa, fb = first_agents(db), first_agents(sheet)
+    both = fa.index.intersection(fb.index)
+    tie_diff = int((fa.loc[both] != fb.loc[both]).sum())
+
+    m = leads_db.set_index("phone")[["answered", "agent"]].join(
+        leads_sheet.set_index("phone")[["answered", "agent"]], rsuffix="_sheet")
+    ans_diff = int((m["answered"] != m["answered_sheet"]).sum())
+    agent_diff = int((m["agent"] != m["agent_sheet"]).sum())
+
+    def span(d):
+        return f"{d['date'].min():%Y-%m-%d} to {d['date'].max():%Y-%m-%d}" if len(d) else "empty"
+
+    facts = {
+        "ringcx rows database / sheet (same date range)": f"{len(db)} / {len(sheet)}",
+        "ringcx dates database / sheet": f"{span(db)} / {span(sheet)}",
+        "accepted calls database / sheet": f"{int((db['result'] == acc).sum())} / {int((sheet['result'] == acc).sum())}",
+        "calls only in database / only in sheet": f"{only_db} / {only_sheet}",
+        "same-day multi-agent ties decided differently": f"{tie_diff} of {len(both)}",
+        "leads with different answered / agent": f"{ans_diff} / {agent_diff}",
+    }
+    if only_db or only_sheet:
+        rep.warn(f"RingCX database and sheet differ: {only_db} calls only in the database, {only_sheet} only in the sheet")
+    if tie_diff:
+        rep.warn(f"database order decides {tie_diff} same-day agent ties differently from sheet order")
+    if ans_diff or agent_diff:
+        rep.warn(f"{ans_diff} lead(s) answered differently and {agent_diff} with a different agent than with the sheet")
+    return facts

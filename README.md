@@ -42,6 +42,22 @@ Generated data is never committed. It exists only inside the workflow run and th
 | Forthcrm - Cordoba | Contacts | Closes, enrolled debt, submitted date (home or cell phone) |
 | Forthcrm - DebtBlue | ContactsV2 | Closes by stage and created date (no debt field) |
 
+### RingCX from PostgreSQL (prepared, not switched on)
+
+`sources.ringcx.backend` is `sheets` today. `pipeline/pg.py` can read RingCX from the BFF table `ringcx_inbound`
+instead, read-only: the session is read-only, every statement has a timeout, column names come only from the
+config and values are parameters. The table is maintained outside this project; the pipeline never writes to it.
+
+To switch (only after approval):
+
+1. Run `docs/ringcx_inbound_inspection.sql` (read-only, aggregates only) and confirm the column mapping.
+2. Fill `sources.ringcx.postgres.columns` and an approved `order_by` that reproduces sheet order for the
+   same-day agent tie-break (U2).
+3. Add the repository secret `RINGCX_DATABASE_URL` with a read-only role's connection string.
+4. Set `backend: postgres` on the branch and run a preview. With `compare_with_sheets: true` the run also
+   reads the sheet and reports, as counts only, calls found in one source but not the other, ties decided
+   differently and leads whose answered/agent result would change.
+
 ### Rules (all in `config/report.yaml`)
 
 - Phones match on their last 10 digits.
