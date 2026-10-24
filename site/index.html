@@ -192,7 +192,7 @@ window.dash = (() => {
     <p class="cnote">Lender record submitted on or after the paid call. Status is the lender's current one.</p>
     <div class="tm-tablewrap">
       <table class="tm-deals">
-        <thead><tr><th>Lead</th><th>Paid call</th><th>Agent</th><th>Lender</th><th>Status</th><th class="num">Days to close</th><th class="num">Debt enrolled</th><th>Lender agent</th></tr></thead>
+        <thead><tr><th>Lead</th><th>Paid call</th><th>Agent</th><th>Lender</th><th>Status</th><th class="num">Days to close</th><th class="num">Debt enrolled</th></tr></thead>
         <tbody></tbody>
       </table>
     </div>
@@ -390,7 +390,7 @@ function fillDeals(table, rows) {
   for (const r of rows) {
     const tr = document.createElement('tr');
     const st = document.createElement('span'); st.className = 'pill ' + (Number(r.active) === 1 ? 'ok' : 'bad'); st.textContent = r.close_status;
-    const cells = [r.lead_id, fDayY(parseT(r.paid_call)), r.agent, r.close_lender, st, (r.days_to_close == null ? '—' : r.days_to_close), (r.debt_enrolled == null || r.debt_enrolled === '') ? '—' : fUsd2(Number(r.debt_enrolled)), r.lender_agent];
+    const cells = [r.lead_id, fDayY(parseT(r.paid_call)), r.agent, r.close_lender, st, (r.days_to_close == null ? '—' : r.days_to_close), (r.debt_enrolled == null || r.debt_enrolled === '') ? '—' : fUsd2(Number(r.debt_enrolled))];
     cells.forEach((v, i) => { const td = document.createElement('td'); if (v instanceof Node) td.appendChild(v); else td.textContent = v; if (i === 5 || i === 6) td.className = 'num'; tr.appendChild(td); });
     tb.appendChild(tr);
   }

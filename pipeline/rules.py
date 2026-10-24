@@ -377,7 +377,6 @@ def to_public_rows(leads: pd.DataFrame, cfg: dict) -> list[dict]:
         week = (t.normalize() - pd.Timedelta(days=t.weekday()))
         closed = bool(r.closed)
         cd = r.close_date if closed else pd.NaT
-        la = r.lender_agent if closed and isinstance(r.lender_agent, str) else ""
         rows.append({
             "lead_id": f"{pre}{i:03d}",
             "paid_call": t.strftime("%Y-%m-%dT%H:%M:%S"),
@@ -400,7 +399,8 @@ def to_public_rows(leads: pd.DataFrame, cfg: dict) -> list[dict]:
             "close_date": cd.strftime("%Y-%m-%dT%H:%M:%S") if closed and pd.notna(cd) else "",
             "days_to_close": int((cd.normalize() - t.normalize()).days) if closed and pd.notna(cd) else None,
             "debt_enrolled": (round(float(r.debt_enrolled), 2) if closed and pd.notna(r.debt_enrolled) else None),
-            "lender_agent": (la.title() if la.isupper() else la),
+            # lender_agent (the lender's raw ownership value) stays internal: it can name lender staff or
+            # unverified spellings, so it is never published.
         })
     return rows
 

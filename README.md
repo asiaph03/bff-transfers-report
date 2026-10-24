@@ -244,7 +244,8 @@ artifact it produced.
 
 ## Privacy
 
-The dashboard is public. It publishes agent names, lender agent names, close dates, statuses, payouts and
-debt amounts per deal, with lead ids (P001…) instead of phones. It never publishes phone numbers, client
+The dashboard is public. It publishes answering-agent names, close dates, statuses, payouts and debt amounts
+per deal, with lead ids (P001…) instead of phones. Lender ownership values (the lender's assignee) are used
+internally for matching and review only and are not published. It never publishes phone numbers, client
 names or emails, and the build fails if a published file contains a phone-number-like value or an email.
 The Google Sheets stay private and are read with a short-lived, read-only token that is refreshed as needed; no Google key exists.

@@ -192,6 +192,16 @@ def test_undated_closed_record_is_excluded(cfg):
 
 
 # ---- output, privacy, baseline ----
+def test_lender_agent_stays_internal_and_is_not_published(cfg):
+    out, _ = closes(cfg, lender_tables(cit=[(fake_phone(2), "Enrolled", "2026-05-12", 2000)]))
+    assert out.set_index("phone").loc[fake_phone(2), "lender_agent"] == "AGENT A"     # still available internally
+    rows = rules.to_public_rows(out, cfg)
+    assert any(r["closed"] for r in rows)                                             # a closed deal is published
+    assert all("lender_agent" not in r and "closing_agent" not in r for r in rows)
+    assert "lender_agent" not in cfg["publish"]["fields"] and len(cfg["publish"]["fields"]) == 21
+    assert "AGENT A" not in json.dumps(rows) and "Agent A" not in json.dumps(rows)
+
+
 def test_public_rows_have_only_approved_fields_and_no_phones(cfg):
     out, _ = closes(cfg, lender_tables(cit=[(fake_phone(2), "Enrolled", "2026-05-12", 2000)]))
     rows = rules.to_public_rows(out, cfg)
