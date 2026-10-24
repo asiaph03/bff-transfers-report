@@ -58,13 +58,14 @@ Mapping (from the owner's pgAdmin inspection): `interaction_date` = date, `call_
 `agent_full_name` = agent, `ani` = phone, `uii` = candidate call id, `queue` = queue (filter
 `Two-Minute Transfers`), from 2026-04-01. `agent_email` is not used by any rule.
 
-**Open before switching:** the sheet's row order decides same-day agent ties (U2). Read-only checks on the
-live table (Oct 24) found the same calls in those cases but no column that reproduces the sheet's order:
-`interaction_date` has no time, `uii` repeats across rows of one call, and ordering by `enqueue_start_time`
-(time of day, in either direction) or by `uii` settles the ties differently from the sheet. The proposed
-`ORDER BY interaction_date, enqueue_start_time, uii` (earliest call of the day first) would be a change to U2,
-affecting the agent shown for up to 11 of 300 leads; it stays unapproved (`order_by_approved: false`) and a
-comparison run will report exactly which leads differ.
+**Blocker (owner decision, Oct 24: keep rule U2 and Google Sheets):** the database has the same calls and
+totals as the sheet, but no column that records ingestion order, which U2 needs for 59 same-day multi-agent
+cases (agent shown for up to 11 of 300 leads). Read-only checks found that physical insertion order (`ctid`)
+reproduces the sheet's order (first- and last-agent tallies match for all 18 agents; the table has had 0
+updates and 0 deletes), but `ctid` is not durable. The fix is the owner's: capture it once into a real column
+`source_seq` and keep it for new rows (`docs/ringcx_inbound_source_seq.sql`). The config already orders by
+`interaction_date, source_seq` and fails closed until that column exists and is present and unique on every
+row. Time order (`enqueue_start_time`) and `uii` order do not reproduce U2 and are not used.
 
 **Comparison run (preview only, nothing published):** Actions -> Refresh dashboard -> `mode: preview`,
 `ringcx_source: postgres-compare`. Needs the repository secret `RINGCX_DATABASE_URL` (read-only role) and a

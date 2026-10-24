@@ -129,6 +129,10 @@ def check_pg_quality(rep: Report, diag: dict, rcx: pd.DataFrame, cfg: dict) -> N
               f"{diag.get('missing_date')} missing or unreadable")
     rep.check(diag.get("missing_result", 1) == 0, "ringcx database: every row has a call result",
               f"{diag.get('missing_result')} missing")
+    if "missing_sequence" in diag:
+        rep.check(diag["missing_sequence"] == 0 and diag["repeated_sequence"] == 0,
+                  "ringcx database: every row has its own ingestion sequence number",
+                  f"{diag['missing_sequence']} missing, {diag['repeated_sequence']} repeated")
     a = rcx[rcx["result"] == acc]
     bad = int(((a["agent"] == "") | (a["phone"] == "")).sum())
     rep.check(bad == 0, "ringcx database: every accepted call has an agent and a usable phone", f"{bad} without")

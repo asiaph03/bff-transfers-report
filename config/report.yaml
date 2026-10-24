@@ -52,13 +52,14 @@ sources:
         queue: queue
       queue_value: Two-Minute Transfers
       all_rows_are_queue: false
-      # Live read-only checks (Oct 24): interaction_date is a date (time always 00:00); enqueue_start_time is
-      # "HH:MM:SS US/Eastern", 24-hour, fixed length, so text order is time order within a day and it separates
-      # all 59 same-day multi-agent cases (uii separates 49). The database holds the same 190 accepted calls in
-      # those cases as the sheet, but neither time order (either direction) nor uii order reproduces the sheet's
-      # row order, which follows how report rows were appended. Up to 11 of the 300 leads take their agent from
-      # such a case. Switching therefore changes rule U2 and needs the owner's decision.
-      order_by: [interaction_date, enqueue_start_time, uii]   # PROPOSED: earliest call of the day first; not approved
+      # Live read-only checks (Oct 24): interaction_date is a date only; uii repeats across rows of one call;
+      # ordering by enqueue_start_time or uii does NOT reproduce the sheet's order for the 59 same-day
+      # multi-agent cases. Physical insertion order (ctid) DOES (first and last agent tallies match the sheet
+      # for all 18 agents), but ctid is not durable. The owner decided to keep rule U2 (sheet order) and to
+      # record insertion order in a real column, source_seq, maintained by the loader. Until that column exists
+      # a database run fails closed (undefined column); nothing switches without a clean comparison and approval.
+      order_by: [interaction_date, source_seq]
+      sequence_column: source_seq    # must be present and unique on every row read, or the run fails
       order_by_approved: false
       approved_for_dashboard: false  # true only after a clean comparison and the owner's approval
       timestamp_timezone: null       # needed only if interaction_date is a zone-aware timestamp

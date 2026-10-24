@@ -546,8 +546,9 @@ class _Cur:
 class FakeConn:
     """Answers the count query, then the rows query; records SQL, params and connection settings."""
 
-    def __init__(self, rows, count=None, fail_on=None, names=RESULT_COLS, undated=0):
+    def __init__(self, rows, count=None, fail_on=None, names=RESULT_COLS, undated=0, seq_missing=0, seq_repeated=0):
         self.rows, self.count, self.fail_on, self.names, self.undated = rows, count, fail_on, names, undated
+        self.seq_missing, self.seq_repeated = seq_missing, seq_repeated
         self.sql, self.params, self.closed, self.read_only, self.isolation_level = [], [], False, None, None
 
     def transaction(self):
@@ -564,7 +565,9 @@ class FakeConn:
         if self.fail_on and self.fail_on in text:
             raise psycopg.errors.QueryCanceled("canceling statement due to statement timeout (host db.example)")
         if text.startswith("SELECT count("):
-            return _Cur([(len(self.rows) if self.count is None else self.count, self.undated)], ["count", "undated"])
+            n = len(self.rows) if self.count is None else self.count
+            distinct = n - self.seq_missing - self.seq_repeated
+            return _Cur([(n, self.undated, self.seq_missing, distinct)], ["count", "undated", "seq_missing", "seq_distinct"])
         return _Cur(self.rows, self.names)
 
     def close(self):
@@ -598,6 +601,7 @@ def test_shipped_pg_mapping_is_complete_but_not_switched_on():
     assert pgc["columns"] == {"date": "interaction_date", "result": "call_result", "agent": "agent_full_name",
                               "phone": "ani", "call_id": "uii", "queue": "queue"}
     assert pgc["order_by_approved"] is False and pgc["approved_for_dashboard"] is False
+    assert pgc["order_by"] == ["interaction_date", "source_seq"] and pgc["sequence_column"] == "source_seq"
     assert pgmod.check_pg_config(pgc) == []
 
 
@@ -627,7 +631,7 @@ def test_pg_query_is_read_only_bounded_parameterised_and_ordered(monkeypatch):
     assert rows_sql.startswith('SELECT "interaction_date" AS "Date", "call_result" AS "Call Result", '
                                '"agent_full_name" AS "Agent Full Name", "ani" AS "ANI", "uii" AS "_call_id"')
     assert 'FROM "public"."ringcx_inbound"' in rows_sql
-    assert 'ORDER BY "interaction_date", "enqueue_start_time", "uii"' in rows_sql
+    assert 'ORDER BY "interaction_date", "source_seq"' in rows_sql
     assert '"interaction_date" >= %(since)s AND "queue" = %(queue)s' in rows_sql and "Two-Minute" not in rows_sql
     assert conn.params[1] == {"since": _dt.date(2026, 4, 1), "queue": "Two-Minute Transfers"}
     assert not any(w in " ".join(conn.sql).upper() for w in ("INSERT", "UPDATE", "DELETE", "TRUNCATE", "ALTER", "CREATE", "DROP", "GRANT"))
@@ -832,3 +836,37 @@ def test_pg_undated_rows_outside_the_date_bound_still_fail(cfg, monkeypatch):
     rep = validate.Report()
     validate.check_pg_quality(rep, src.diag, rules.prepare_ringcx(df, cfg), cfg)
     assert any("interaction date" in f for f in rep.failures)
+
+
+# ---- ingestion sequence (simulated only) ----
+def test_pg_config_refuses_unstable_system_columns_as_order():
+    for col in ("ctid", "CTID", "xmin"):
+        assert any("system columns" in p for p in pgmod.check_pg_config(pg_cfg(order_by=["interaction_date", col])))
+    assert any("real column" in p for p in pgmod.check_pg_config(pg_cfg(sequence_column="ctid")))
+    assert any("part of order_by" in p for p in pgmod.check_pg_config(pg_cfg(order_by=["interaction_date", "uii"])))
+
+
+def test_pg_sequence_is_counted_in_the_same_snapshot(monkeypatch):
+    conn = FakeConn(DB_ROWS)
+    src, _ = pg_source(conn, monkeypatch)
+    src.read()
+    assert '"source_seq" IS NULL' in conn.sql[0] and 'count(DISTINCT "source_seq")' in conn.sql[0]
+    assert src.diag["missing_sequence"] == 0 and src.diag["repeated_sequence"] == 0
+
+
+def test_pg_missing_or_repeated_sequence_fails_closed(cfg, monkeypatch):
+    for kw in ({"seq_missing": 1}, {"seq_repeated": 1}):
+        src, _ = pg_source(FakeConn(DB_ROWS, **kw), monkeypatch)
+        df = src.read()
+        rep = validate.Report()
+        validate.check_pg_quality(rep, src.diag, rules.prepare_ringcx(df, cfg), cfg)
+        assert any("ingestion sequence" in f for f in rep.failures), kw
+
+
+def test_pg_without_sequence_column_skips_that_check(cfg, monkeypatch):
+    src, _ = pg_source(FakeConn(DB_ROWS), monkeypatch, cfg=pg_cfg(sequence_column=None, order_by=["interaction_date", "uii"]))
+    df = src.read()
+    assert "missing_sequence" not in src.diag
+    rep = validate.Report()
+    validate.check_pg_quality(rep, src.diag, rules.prepare_ringcx(df, cfg), cfg)
+    assert rep.ok

@@ -27,6 +27,9 @@ from .sheets import SourceError
 
 IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 FIELDS = ("date", "result", "agent", "phone")
+# PostgreSQL system columns. ctid follows physical storage, which UPDATE, VACUUM FULL, CLUSTER and
+# dump/restore can change, so none of these may define the reporting order.
+SYSTEM_COLUMNS = {"ctid", "xmin", "xmax", "cmin", "cmax", "tableoid"}
 
 
 def check_pg_config(pg: dict) -> list[str]:
@@ -53,6 +56,14 @@ def check_pg_config(pg: dict) -> list[str]:
     ob = pg.get("order_by")
     if not (isinstance(ob, list) and ob and all(isinstance(c, str) and IDENT.match(c) for c in ob)):
         e.append("sources.ringcx.postgres.order_by must be a list of columns (stands in for sheet order, U2)")
+    elif any(c.lower() in SYSTEM_COLUMNS for c in ob):
+        e.append("sources.ringcx.postgres.order_by must not use system columns such as ctid (not a stable order)")
+    seq = pg.get("sequence_column")
+    if seq is not None:
+        if not (isinstance(seq, str) and IDENT.match(seq)) or seq.lower() in SYSTEM_COLUMNS:
+            e.append("sources.ringcx.postgres.sequence_column must be a real column name or null")
+        elif not (isinstance(ob, list) and seq in ob):
+            e.append("sources.ringcx.postgres.sequence_column must be part of order_by")
     for k in ("order_by_approved", "approved_for_dashboard"):
         if not isinstance(pg.get(k), bool):
             e.append(f"sources.ringcx.postgres.{k} must be true or false")
@@ -81,8 +92,14 @@ def build_query(pg: dict, sheet_cols: dict):
     order = sql.SQL(", ").join(sql.Identifier(x) for x in pg["order_by"])
     # Rows with no date never pass the date bound, so they are counted separately (same queue filter).
     queue_only = sql.SQL("{} = %(queue)s").format(sql.Identifier(c["queue"])) if c.get("queue") else sql.SQL("TRUE")
-    count_sql = sql.SQL("SELECT count(*) FILTER (WHERE {w}), count(*) FILTER (WHERE {d} IS NULL) FROM {t} WHERE {q}").format(
-        w=where_sql, d=sql.Identifier(c["date"]), t=table, q=queue_only)
+    seq = pg.get("sequence_column")
+    if seq:   # the ingestion sequence must be present and unique on every row the report reads
+        seq_sql = sql.SQL("count(*) FILTER (WHERE {w} AND {s} IS NULL), count(DISTINCT {s}) FILTER (WHERE {w})").format(
+            w=where_sql, s=sql.Identifier(seq))
+    else:
+        seq_sql = sql.SQL("NULL, NULL")
+    count_sql = sql.SQL("SELECT count(*) FILTER (WHERE {w}), count(*) FILTER (WHERE {d} IS NULL), {sq} FROM {t} WHERE {q}").format(
+        w=where_sql, d=sql.Identifier(c["date"]), sq=seq_sql, t=table, q=queue_only)
     rows_sql = sql.SQL("SELECT {p} FROM {t} WHERE {w} ORDER BY {o}").format(
         p=sql.SQL(", ").join(picks), t=table, w=where_sql, o=order)
     return count_sql, rows_sql
@@ -151,7 +168,7 @@ class PostgresRingcxSource:
             conn.read_only = True
             conn.isolation_level = psycopg.IsolationLevel.REPEATABLE_READ
             with conn.transaction():
-                n, undated = conn.execute(count_sql, params).fetchone()
+                n, undated, seq_missing, seq_distinct = conn.execute(count_sql, params).fetchone()
                 if n > self.pg["max_rows"]:
                     raise SourceError(f"{where}: {n} rows exceed max_rows {self.pg['max_rows']}; not reading")
                 cur = conn.execute(rows_sql, params)
@@ -178,6 +195,9 @@ class PostgresRingcxSource:
         df["_row"] = range(2, len(df) + 2)
         self.diag = self._quality(df)
         self.diag["missing_date"] += int(undated or 0)   # undated rows in the queue, outside the date bound
+        if self.pg.get("sequence_column"):
+            self.diag["missing_sequence"] = int(seq_missing or 0)
+            self.diag["repeated_sequence"] = int(n - (seq_missing or 0) - (seq_distinct or 0))
         self.diag["seconds"] = round(time.monotonic() - t0, 1)
         print(f"  {where}: {n} rows in {self.diag['seconds']}s ({self.diag['first_date']} to {self.diag['last_date']})", flush=True)
         return df
