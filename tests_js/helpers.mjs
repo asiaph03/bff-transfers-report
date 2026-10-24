@@ -17,6 +17,7 @@ export const enc = new TextEncoder();
 // The page's own polling settings, so tests derive their timing from them instead of hard-coding it.
 export const POLL_DEFAULTS = new Function(block('POLL') + '\nreturn BffPoll.DEFAULTS;')();
 export const INTERVAL = POLL_DEFAULTS.intervalMs;
+export const LONGEST_FIRST_WAIT = Math.ceil(INTERVAL * 1.1);      // interval plus the full 10% jitter (the page uses Math.random)
 
 // ---------- fixtures ----------
 export const nodeVersion = (bytes) => createHash('sha256').update(bytes).digest().subarray(0, 18).toString('base64url');

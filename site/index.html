@@ -37,6 +37,7 @@ body { margin: 0; background: var(--bg); color: var(--color-fg); font-family: va
 .tm-sub { color: var(--color-fg-muted); font-size: var(--cds-font-size-caption); margin: var(--cds-gap-xs) 0 0; }
 .tm-updates { color: var(--color-fg-muted); font-size: var(--cds-font-size-caption); margin: var(--cds-gap-xs) 0 0; }
 .tm-updates.warn { color: var(--color-bad); }
+.tm-agent-note { margin: var(--cds-gap-sm) 0 0; padding-left: var(--cds-gap-sm); border-left: 3px solid var(--c2); font-size: var(--cds-font-size-caption); color: var(--color-fg); max-width: 60ch; }
 .sr-only { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
 .tm-take { margin: var(--cds-gap-sm) 0 0; font-size: var(--cds-font-size-body); max-width: 60ch; }
 .tm-take b { font-weight: 600; }
@@ -333,6 +334,7 @@ window.dash = (() => {
 </script>
 
 <div id="update-live" class="sr-only" role="status" aria-live="polite" aria-atomic="true"></div>
+<div id="agent-live" class="sr-only" role="status" aria-live="polite" aria-atomic="true"></div>
 
 <main class="tm">
   <header class="tm-head" id="overview">
@@ -341,6 +343,7 @@ window.dash = (() => {
       <p class="tm-sub" id="window">Last 300 paid leads · <span class="w-first">—</span> to <span class="w-last">—</span> · <span class="w-refresh">loading data…</span></p>
       <p class="tm-updates" id="update-status">Checks for new reports automatically.</p>
       <p class="tm-stale" id="stale" hidden></p>
+      <p class="tm-agent-note" id="agent-note" hidden></p>
       <p class="tm-take" id="takeaway"><span class="t-closed">—</span> of <span class="t-leads">—</span> paid leads closed (<span class="t-rate">—</span>), <span class="t-debt">—</span> of debt enrolled. <span class="t-extra"></span></p>
     </div>
     <div class="tm-controls">
@@ -473,10 +476,33 @@ dash.calc('lenders', {
 </script>
 
 <script>
+/* BFF-AGENT:BEGIN */
+/* The selected agent can be missing from a newer report. The view then shows all agents while the stored selection is kept, so it
+   returns by itself if the agent comes back. This explains the difference in text on the page and once aloud, and clears it again.
+   Names are put on the page as text, never as markup. */
+function createAgentNotice(note, live) {
+  let shown = null;                                       // the agent being explained now, or null
+  return function update(selected, available) {
+    const missing = selected && selected !== 'All' && !available.includes(selected) ? selected : null;
+    if (missing === shown) return;                        // the page redraws on every filter change and resize: only a change of state touches the notice
+    const was = shown; shown = missing;
+    if (missing !== null) {
+      note.textContent = 'The selected agent, ' + missing + ', is not in the latest report, so this view shows all agents. The selection is kept and comes back if '
+        + missing + ' appears in a later report. Choose another agent or press Reset to clear it.';
+      note.hidden = false;
+      live.textContent = 'The selected agent, ' + missing + ', is not in the latest report. Showing all agents.';
+    } else {
+      note.textContent = ''; note.hidden = true;
+      live.textContent = selected === was ? 'Showing ' + was + ' again.' : '';          // back in the report, or the reader chose something else (nothing to say)
+    }
+  };
+}
+/* BFF-AGENT:END */
 const fInt = d3.format(','), fPct = d3.format('.1%'), fUsd = d3.format('$,.0f'), fUsd2 = d3.format('$,.2f');
 const fDay = d3.utcFormat('%b %-d'), fDayY = d3.utcFormat('%b %-d, %Y'), fMon = d3.utcFormat('%b %Y');
 const parseT = (s) => new Date(s.slice(0, 19) + 'Z');
 const sel = document.querySelector('.tm-agent');
+const agentNotice = createAgentNotice(document.getElementById('agent-note'), document.getElementById('agent-live'));
 const setDefaults = () => dash.setParams({ agent: 'All', grain: 'week' });
 if (!dash.params().agent) setDefaults();
 sel.addEventListener('change', () => dash.setParams({ agent: sel.value }));
@@ -619,6 +645,7 @@ dash.onData(() => {
   const sig = opts.join('\u0001');     // rebuild the list only when it changed, so an automatic refresh never closes an open dropdown
   if (sel.dataset.sig !== sig) { sel.replaceChildren(...opts.map((a) => new Option(a === 'All' ? 'All agents' : a, a))); sel.dataset.sig = sig; }
   sel.value = opts.includes(agent) ? agent : 'All';
+  agentNotice(agent, opts);
   const s = rows.find((r) => r.agent === sel.value) || rows[0];
   markWhere(root, 'agent=' + enc(s.agent));
   root.querySelectorAll('.dash-skeleton').forEach((e) => e.classList.remove('dash-skeleton'));
