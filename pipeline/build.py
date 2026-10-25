@@ -6,12 +6,14 @@
     python -m pipeline.build --out out --preview             # preview: missing baseline is only a warning
     python -m pipeline.build --out out --first-release       # only for the first approved publication
 
-Writes out/site/ (index.html, data.json, summary.json, vendor/) and out/validation.md.
+Writes out/site/ (index.html, data.json, summary.json, vendor/) and out/validation.md. summary.json carries a small
+"report" manifest (version = hash of data.json, byte size, row count) that the page polls to see new reports.
 If any check fails, out/site/ is removed and the exit code is 1, so nothing can be deployed.
 """
 from __future__ import annotations
 
 import argparse
+import base64
 import datetime as dt
 import hashlib
 import json
@@ -28,6 +30,15 @@ from .sheets import GoogleSheetsSource, LocalSource, SourceError, assert_no_secr
 from .timing import StageTimer, peak_memory_mb
 
 ROOT = Path(__file__).resolve().parent.parent
+
+
+def report_version(data: bytes) -> str:
+    """Identity of a published report: the first 18 bytes of the SHA-256 of data.json, as 24 base64url characters.
+
+    The page recomputes this from what it downloads (site/index.html, BffPoll.versionOf) and must get the same text.
+    base64url, not hex: a hex digest can contain a run of ten digits, which the privacy check's phone-number pattern
+    would flag by chance; base64url makes that practically impossible."""
+    return base64.urlsafe_b64encode(hashlib.sha256(data).digest()[:18]).decode("ascii")
 
 
 def vendor_ok(path: Path) -> bool:
@@ -205,6 +216,8 @@ def run(args) -> int:
     facts["baseline"] = "none" if baseline is None else json.dumps({k: baseline.get(k) for k in ("closed", "active", "debt_enrolled", "payout")})
 
     refreshed = dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat()
+    data_text = json.dumps({"refreshed_at": refreshed, "rows": rows}, separators=(",", ":"))
+    data_bytes = data_text.encode("utf-8")
     summary = {
         "refreshed_at": refreshed,
         "window": {"size": cfg["report"]["window_size"], "label": cfg["report"]["lead_label"]},
@@ -212,8 +225,10 @@ def run(args) -> int:
         "warnings": [w for w in rep.warnings if "baseline" not in w],  # data notes shown on the page
         "stale_after_days": cfg["validation"]["stale_after_days"],
         "config_version": cfg["version"],
+        # The report's identity, for the page's update check: a hash of the exact bytes of data.json, so a new
+        # version means different published data and the page can verify what it downloads.
+        "report": {"version": report_version(data_bytes), "data_file": "data.json", "data_bytes": len(data_bytes), "rows": len(rows)},
     }
-    data_text = json.dumps({"refreshed_at": refreshed, "rows": rows}, separators=(",", ":"))
     summary_text = json.dumps(summary, indent=2)
     page = (ROOT / "site" / "index.html").read_text(encoding="utf-8")
     validate.check_privacy(rep, {"index.html": page, "data.json": data_text, "summary.json": summary_text})
@@ -232,7 +247,7 @@ def run(args) -> int:
     (site / "vendor").mkdir()
     (site / "index.html").write_text(page, encoding="utf-8")
     shutil.copy2(vend, site / "vendor" / vend.name)
-    (site / "data.json").write_text(data_text, encoding="utf-8")
+    (site / "data.json").write_bytes(data_bytes)      # exactly the bytes the version was computed from
     (site / "summary.json").write_text(summary_text, encoding="utf-8")
     (site / ".nojekyll").write_text("", encoding="utf-8")
     facts["refreshed_at"] = refreshed

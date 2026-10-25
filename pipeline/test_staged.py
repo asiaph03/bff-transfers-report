@@ -60,8 +60,13 @@ def run_build(tmp_path: Path, monkeypatch, files: dict, name: str, *flags: str):
     site = d / "out" / "site"
     pub = None
     if site.exists():
-        data, summary = json.loads((site / "data.json").read_text()), json.loads((site / "summary.json").read_text())
+        raw = (site / "data.json").read_bytes()
+        data, summary = json.loads(raw), json.loads((site / "summary.json").read_text())
         data.pop("refreshed_at"), summary.pop("refreshed_at")
+        # Each build's manifest must describe its own data.json. The version is a hash of data.json, which contains the
+        # timestamp, so it differs between two builds a second apart; everything else in the manifest must still match.
+        assert summary["report"]["version"] == build.report_version(raw) and summary["report"]["data_bytes"] == len(raw)
+        summary["report"] = {k: v for k, v in summary["report"].items() if k != "version"}
         pub = (data, summary, (site / "index.html").read_bytes())
     return rc, text, pub
 

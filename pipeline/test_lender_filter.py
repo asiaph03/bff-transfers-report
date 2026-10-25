@@ -289,8 +289,12 @@ def test_published_files_are_identical_with_and_without_the_filter(tmp_path, mon
         rc, _ = run_build(work, monkeypatch, files)
         assert rc == 0
         site = work / "out" / "site"
-        data, summary = json.loads((site / "data.json").read_text()), json.loads((site / "summary.json").read_text())
+        raw = (site / "data.json").read_bytes()
+        data, summary = json.loads(raw), json.loads((site / "summary.json").read_text())
         data.pop("refreshed_at"), summary.pop("refreshed_at")
+        # Each build's manifest must describe its own data.json; its version hashes the timestamp too, so it is not compared across builds.
+        assert summary["report"]["version"] == build.report_version(raw) and summary["report"]["data_bytes"] == len(raw)
+        summary["report"] = {k: v for k, v in summary["report"].items() if k != "version"}
         published[mode] = (data, summary, (site / "index.html").read_bytes())
     assert published["filtered"] == published["full"]
     assert published["filtered"][1]["totals"]["closed"] > 0          # the comparison covered real closes
