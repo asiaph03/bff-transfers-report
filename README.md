@@ -223,6 +223,16 @@ serves a new deployment is not guaranteed (its documentation says up to about 10
 new report the page says so and shows all agents, and the selection returns if the agent does. Details, request costs,
 accessibility notes and limitations: `docs/dashboard_polling.md`.
 
+### Publication safeguards
+
+A failed refresh never replaces the last-known-good report. After the build writes the site, the files are read back and verified
+(`python -m pipeline.verify_site out/site`): exactly the expected files, a manifest that matches the bytes of `data.json`, matching
+timestamps, only the approved public fields, no personal data or secrets. Before deploying, the deploy job refuses to put an older
+report over a newer one; after deploying, it waits up to about 12 minutes for the live site to serve the candidate and says plainly
+if it does not (the deployment may already have happened; that check does not roll anything back). Every successful run keeps its
+verified files as the `site-preview` artifact, 90 days for publish runs. See `docs/publication_safety.md` for the sequence, the
+failure table and the recovery procedure.
+
 ## Local testing
 
 ```
