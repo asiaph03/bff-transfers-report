@@ -8,7 +8,8 @@
 
 Writes out/site/ (index.html, data.json, summary.json, vendor/) and out/validation.md. summary.json carries a small
 "report" manifest (version = hash of data.json, byte size, row count) that the page polls to see new reports.
-If any check fails, out/site/ is removed and the exit code is 1, so nothing can be deployed.
+If any check fails, out/site/ is removed and the exit code is 1, so nothing can be deployed. After writing, the files are
+read back and verified (pipeline/verify_site.py); only the files this build writes are ever deleted.
 """
 from __future__ import annotations
 
@@ -23,7 +24,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-from . import rules, validate
+from . import rules, validate, verify_site
 from . import staged as staged_mod
 from .config import ConfigError, load_config
 from .sheets import GoogleSheetsSource, LocalSource, SourceError, assert_no_secret, read_all
@@ -61,8 +62,6 @@ def fetch_baseline(url: str) -> dict | None:
 def run(args) -> int:
     out = Path(args.out)
     site = out / "site"
-    if site.exists():
-        shutil.rmtree(site)
     out.mkdir(parents=True, exist_ok=True)
     rep = validate.Report()
     facts: dict = {}
@@ -76,6 +75,13 @@ def run(args) -> int:
         timer.lap("finish")
         facts.update(timer.facts(fetch, peak_memory_mb()))
         return finish(rep, facts, out, site)
+
+    # Stale output of an earlier build is cleared; anything else found in out/site is not ours and is never deleted.
+    left = verify_site.remove_build_output(site)
+    if left:
+        rep.check(False, "output folder holds only files this build writes",
+                  f"{len(left)} item(s) in {site.name}/ are not this build's files or could not be removed; none were deleted beyond this build's own files")
+        return done(None)
 
     try:
         cfg = load_config(args.config)
@@ -250,6 +256,13 @@ def run(args) -> int:
     (site / "data.json").write_bytes(data_bytes)      # exactly the bytes the version was computed from
     (site / "summary.json").write_text(summary_text, encoding="utf-8")
     (site / ".nojekyll").write_text("", encoding="utf-8")
+    # Read the written files back and check what would really be published (files, manifest, timestamps, fields, privacy).
+    checked = verify_site.verify(site, cfg, source_index=ROOT / "site" / "index.html", now=dt.datetime.now(dt.timezone.utc),
+                                 vendor_sha256=(ROOT / "site" / "vendor" / "SHA256SUMS").read_text().split()[0])
+    rep.check(checked.ok, "published files verified after writing", "; ".join(checked.problems[:5]))
+    if not rep.ok:
+        return done(None)
+    facts["site verification"] = f"passed: {len(verify_site.EXPECTED_FILES)} files read back; the manifest matches the bytes of data.json"
     facts["refreshed_at"] = refreshed
     return done(site)
 
@@ -286,7 +299,7 @@ def finish(rep: validate.Report, facts: dict, out: Path, site: Path | None) -> i
     (out / "validation.md").write_text(text, encoding="utf-8")
     print(text)
     if not rep.ok and (out / "site").exists():
-        shutil.rmtree(out / "site")
+        verify_site.discard_build_output(out / "site")     # only this build's own files; a cleanup problem never changes the result
     return 0 if rep.ok and site is not None else 1
 
 
@@ -316,13 +329,19 @@ def main(argv=None) -> int:
     try:
         return run(args)
     except Exception as e:  # never leave a run without a report; never print data or secrets
-        out = Path(args.out)
-        out.mkdir(parents=True, exist_ok=True)
-        if (out / "site").exists():
-            shutil.rmtree(out / "site")
-        rep = validate.Report()
-        rep.check(False, "build completed", f"unexpected {type(e).__name__} in {e.__traceback__.tb_frame.f_code.co_filename.rsplit('/', 1)[-1] if e.__traceback__ else 'build'}")
-        return finish(rep, {"build stopped (UTC)": dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat()}, out, None)
+        verify_site.discard_build_output(Path(args.out) / "site")     # only this build's own files; best effort, never masks `e`
+        try:
+            out = Path(args.out)
+            out.mkdir(parents=True, exist_ok=True)
+            rep = validate.Report()
+            rep.check(False, "build completed", f"unexpected {type(e).__name__} in {e.__traceback__.tb_frame.f_code.co_filename.rsplit('/', 1)[-1] if e.__traceback__ else 'build'}")
+            return finish(rep, {"build stopped (UTC)": dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat()}, out, None)
+        except Exception:       # not even the report could be written: still a failed run that names the original cause
+            print(f"build failed: unexpected {type(e).__name__}; the validation report could not be written")
+            return 1
+    except BaseException:       # an interrupt (the signal GitHub sends first on cancel) or exit: clear our partial output, then re-raise it unchanged
+        verify_site.discard_build_output(Path(args.out) / "site")
+        raise
 
 
 if __name__ == "__main__":
