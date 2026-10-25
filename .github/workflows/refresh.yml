@@ -132,6 +132,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 25   # the guard, the deployment, and up to about 12 minutes of waiting for the CDN
     permissions:
+      actions: read       # the run-history guard reads this workflow's runs and jobs (read only)
       contents: read      # to check out the checks below (standard library only; nothing is installed)
       pages: write
       id-token: write
@@ -140,6 +141,16 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - uses: actions/checkout@v4
+
+      # An older run never publishes over a newer one: refuse if a newer run of this workflow has reached (or may have reached) the
+      # deployment step, whatever the CDN shows. Fails closed on any API problem. No first-release exemption. Runs first, before
+      # the CDN-based guard below and before anything is deployed.
+      - name: Refuse to publish over a newer run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+        run: python3 -m pipeline.run_guard --repo "$REPO" --run-id "$RUN_ID"
 
       # Never deploy an older report over a newer one, and fail closed when the live report cannot be read or trusted
       # (only a run started with first_release skips the comparison). Runs before anything is deployed.
@@ -153,7 +164,9 @@ jobs:
           if [ "$FIRST_RELEASE" = "true" ]; then FLAG="--first-release"; fi
           python3 -m pipeline.live_check guard --url "$SITE_URL" --candidate-refreshed-at "$CANDIDATE_REFRESHED_AT" $FLAG
 
-      - id: deployment
+      # The name is read by the run-history guard (pipeline/run_guard.py) of later runs: change it only together with DEPLOY_STEP_NAME there.
+      - name: Deploy to GitHub Pages
+        id: deployment
         uses: actions/deploy-pages@v4
 
       # A smoke test of the live site, not a rollback: if it fails the deployment may already have happened.

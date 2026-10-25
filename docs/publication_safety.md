@@ -17,9 +17,10 @@ Refresh dashboard (manual only; one run at a time, see "Queueing")
     4  upload site-preview (the recovery copy)                    kept 90 days for publish runs, 14 for previews
     5  upload the Pages artifact (publish mode only)              kept 1 day (the action's default)
   deploy job (publish mode only, needs the build job, time limit 25 minutes)
-    6  refuse to replace a newer live report (pipeline/live_check.py guard)                        fail: stop, nothing deployed
-    7  deploy-pages
-    8  verify the live site serves the candidate report (live_check verify, up to about 12 minutes) fail: job red, see below
+    6  refuse to publish over a newer run (pipeline/run_guard.py, Actions run history)                fail: stop, nothing deployed
+    7  refuse to replace a newer live report (pipeline/live_check.py guard, what the CDN shows)       fail: stop, nothing deployed
+    8  deploy-pages (the step is named "Deploy to GitHub Pages")
+    9  verify the live site serves the candidate report (live_check verify, up to about 12 minutes) fail: job red, see below
 ```
 
 Steps 4 to 8 run only if every earlier step succeeded: none of the gating steps uses `always()`, `failure()` or `continue-on-error`, and
@@ -31,7 +32,8 @@ the deploy job needs a successful build job (all checked by `pipeline/test_workf
 |---|---|---|
 | Existing validation (sources, rules, baseline limits, privacy, vendor checksum) | `pipeline/validate.py`, `build.py` | unchanged |
 | **Site verification** | `build.py` after writing; its own workflow step | a site that is not exactly: the five expected files, a manifest whose version, byte count and row count describe the bytes of `data.json`, matching timestamps (not in the future), only the approved public fields, no phone numbers, emails or secrets, the page and chart library as in the repository |
-| **Stale-deployment guard** | deploy job, before `deploy-pages` | a candidate older than the live report; an unreadable or untrusted live report (unless the run was started as the first release) |
+| **Run-history guard** | deploy job, first, before `deploy-pages` | an older run publishing over a newer run that has reached (or may have reached) the deployment step, whatever the CDN shows; any problem reading the history |
+| **Stale-deployment guard** (CDN view) | deploy job, before `deploy-pages` | a candidate older than the live report; an unreadable or untrusted live report (unless the run was started as the first release) |
 | **Live check** | deploy job, after `deploy-pages` | nothing: it reports. See below |
 
 Verification messages name files, fields and counts, never values from the report.
@@ -73,11 +75,43 @@ run only after success) and the runner is discarded.
 |---|---|
 | Google Sheets unreadable, validation or baseline failure, site verification failure, an unexpected error | Nothing is uploaded or deployed. The live report is unchanged. |
 | Interrupt, cancel, timeout, kill | A partial `out/site` may be left on the runner (cleanup is not guaranteed on a kill), and the step does not succeed, so no upload or deployment follows. The live report is unchanged. |
-| Stale guard refuses | Nothing is deployed. The live report is unchanged. |
+| Run-history guard or stale guard refuses | Nothing is deployed. The live report is unchanged. |
 | `deploy-pages` fails | Expected to leave the previous deployment active (GitHub's behavior; not observed here, see the end). |
 | Live check fails after a deployment | The deployment **may already have happened**. The check does not roll anything back. |
 
-## The stale-deployment guard
+## The run-history guard (`pipeline/run_guard.py`)
+
+It answers one question before anything is deployed: has a **newer run** of this workflow already reached the deployment step? If so, this
+(older) run is refused, whatever the CDN currently shows. The evidence is the Actions API (the workflow's runs, newest first, and the jobs of
+every attempt of each newer run), read with the deploy job's own token and the one extra permission `actions: read`. Run ids are the ordering;
+they are never the proof of a publication by themselves.
+
+A newer run counts as follows:
+
+| What the API shows for a newer run | Decision for this run |
+|---|---|
+| its deploy job's `Deploy to GitHub Pages` step concluded `success` in any attempt, even if the live check after it failed | **refused**: it published |
+| that step is running | **refused**: it is deploying |
+| that step ended `failure`, `cancelled`, `timed_out` or anything unclear, or a deploy job that started but recorded no steps | **refused**: it may have gone live, and uncertain history never authorizes an older publication |
+| the run itself is executing (any step) | **refused**: runs are serialized by the concurrency group, so an executing newer run means that assumption failed |
+| a preview (the deploy job was skipped), a run that failed before the deployment step, a deploy step skipped | allowed: it never reached deployment |
+| queued, waiting or pending, no evidence it reached deployment | allowed: it waits behind this run and, if it ever deploys, it is newer, so this run publishing first does no harm |
+
+Re-runs keep their run id, so re-running the **newest** run is allowed (nothing is newer; its own earlier attempts are never examined) and
+re-running an **older** run is refused once a newer run has reached deployment. Anything that could change the decision refuses instead of
+guessing: HTTP 401, 403 (the job lacks `actions: read`), 404, rate limits whose `Retry-After` exceeds 60 s, network failures and server errors after 3 bounded
+attempts, malformed JSON, a run history that is incomplete (more than 500 runs to read), not newest-first, duplicated, missing this run or
+containing another workflow's runs, a job list that is incomplete, a newer run without a deploy job named `Publish to GitHub Pages`, a deploy job
+without a step named `Deploy to GitHub Pages` (or with two), and unknown run, job or step states. Requests have a 20 s timeout, `Retry-After`
+is honored up to 60 s, the whole check is bounded to 4 minutes, redirects are never followed and the token goes only to the API host (https; plain http
+only for a local test server). Messages name run ids, numbers and states, never the token. There is **no first-release exemption**: a first release has
+no newer runs, so the API simply answers that, and any API problem still refuses.
+
+The names `Publish to GitHub Pages` and `Deploy to GitHub Pages` are pinned by `pipeline/test_workflow.py` against the guard's constants:
+renaming either without the other fails the tests instead of silently hiding a deployment. The guard supplements the CDN-based guard below;
+it does not replace it, and runs first.
+
+## The stale-deployment guard (what the CDN shows)
 
 The build job exposes the candidate's `refreshed_at`. Before deploying, the deploy job reads the live `summary.json` and compares:
 
@@ -90,12 +124,17 @@ The build job exposes the candidate's `refreshed_at`. Before deploying, the depl
 The live report is read through the CDN, which can serve a copy up to about 10 minutes old. Runs are serialized and each waits for its live
 check, so a run normally sees its predecessor's report, and a stale view can only make the guard more permissive, never stricter.
 
-**Known limitation (not fixed).** The guard trusts the CDN's view. If an older run's deploy job is re-run within roughly 10 minutes of a newer
-deployment, and that older run's Pages artifact still exists, a stale copy of `summary.json` can show a report older than the re-run candidate.
-The guard then allows it and the newer report is replaced. A re-run hours later, or once the CDN shows the newer report, is refused.
-Operating rule: **never re-run the deploy job of a run that is not the newest successful publish run.** A check that does not depend on the CDN
-(comparing run numbers through the Actions API) was considered; it needs a new job permission and is not part of this phase.
-`pipeline/test_live_check.py` pins this behavior so it cannot change unnoticed.
+**This guard alone** trusts the CDN's view: if an older run's deploy job is re-run within roughly 10 minutes of a newer deployment and a stale
+copy of `summary.json` shows a report older than the re-run candidate, it would allow it. `pipeline/test_live_check.py` pins that behavior of
+this guard on its own. The run-history guard above does not depend on cached files and closes that case for runs that contain it.
+
+**Remaining limitations.**
+- A re-run uses the original commit and ref, and (assumed, not verified) that commit's version of the workflow file. A run created **before** the run-history
+  guard existed has neither guard in its workflow, so re-running it bypasses both. Those runs' Pages artifacts expire after 1 day, so the exposure ends one day
+  after the guard is merged. Operating rule until then, and a good habit after: **never re-run the deploy job of a run that is not the newest successful publish run.**
+- The run-history guard sees only this workflow's runs. A deployment made some other way (another workflow, a manual Pages action) is visible to
+  the CDN guard only.
+- A newer run that is merely queued does not block (see the table), by design.
 
 ## The live check
 
@@ -151,11 +190,12 @@ candidate's `refreshed_at` and `version` so the right copy can be found. None of
       ```
       `LIVE CHECK PASSED` means the live site serves exactly that report; a failure only tells you it does not (its warning about a deployment
       refers to the deploy job and does not apply when you run it by hand).
-4. **Redeploy the same newest report** (a deployment or live check failed): on that run, choose **Re-run failed jobs**. The guard allows the same
-   timestamp. This works only while that run's Pages artifact still exists (1 day); after that, roll forward (step 2). Do this only for the
-   newest successful publish run (see the known limitation).
-5. **Restore an exact older report: not automated, on purpose.** The guard refuses an older report over a newer one, and this change does not
-   weaken it. There is no rollback mode in this phase. If one is ever needed it should be a separate, reviewed change that deploys a verified
+4. **Redeploy the same newest report** (a deployment or live check failed): on that run, choose **Re-run failed jobs**. Both guards allow it: the
+   run keeps its id (nothing is newer) and its timestamp (the same report again). This works only while that run's Pages artifact still exists
+   (1 day); after that, roll forward (step 2). Do this only for the newest successful publish run: the run-history guard refuses an older one
+   once a newer run has reached deployment (and see the remaining limitations for runs created before the guard existed).
+5. **Restore an exact older report: not automated, on purpose.** Both guards refuse an older report over a newer one, and nothing here
+   weakens them. There is no rollback mode in this phase. If one is ever needed it should be a separate, reviewed change that deploys a verified
    recovery copy and records who asked and why.
 
 The steps are exercised against scratch folders and a local stand-in for the site only (`pipeline/test_live_check.py`, the simulated deployment
@@ -165,11 +205,17 @@ and recovery-drill tests). No real deployment or rollback was performed.
 
 Verified by tests and probes here: every pre-deployment failure leaves the published files untouched and nothing to upload; the
 verification catches truncated, tampered, inconsistent, extra, missing and sensitive output; cleanup failures never replace the original error
-or interrupt and never make a failed run succeed; the guard and live check decisions, including cache lag and mismatches; the workflow's order,
-outputs, gating, time limits, concurrency and absence of schedules (parsed, not run). Checked against GitHub's documentation and action
-definition: the Pages artifact's default retention (1 day), that a newer pending run replaces an older pending one, and the cancellation signal order.
+or interrupt and never make a failed run succeed; the CDN guard and live check decisions, including cache lag and mismatches; the run-history guard's
+decisions for every case in its table, paging, ordering, malformed or incomplete data, every error class, bounded retries and `Retry-After`, redirects,
+token handling and redaction (a fake API and a local HTTP stand-in, never a real deployment); the workflow's order, outputs, gating, permissions, pinned
+job and step names, time limits, concurrency and absence of schedules (parsed, not run). Checked against GitHub's documentation and action definition:
+the Pages artifact's default retention (1 day), that a newer pending run replaces an older pending one, the cancellation signal order, that `run_id` is
+unchanged and `run_attempt` increases on a re-run, and that `actions: read` is the permission for the runs and jobs endpoints (documented for
+fine-grained tokens; assumed to apply to `GITHUB_TOKEN`). A prototype of the same decision logic was also run read-only against this repository's real run history (the recorded runs predate the step name, so
+today's guard would refuse an older re-run against them with an "unexpected step name" message, which is the intended fail-closed result).
 
 Assumed, not verified: GitHub Pages switches deployments atomically and a failed `deploy-pages` leaves the previous one active; the CDN's timing
-after a deploy (copies seen up to about 10 minutes old); the artifact retention limits that apply to this repository; that Python receives the
-runner's SIGINT through the step's shell; the behavior of re-running only the deploy job; the test suite's duration on the runner; and the
-workflow itself, which was not run.
+after a deploy (copies seen up to about 10 minutes old); the artifact retention limits that apply to this repository; that a re-run uses the original
+commit's workflow file; that Python receives the runner's SIGINT through the step's shell; the behavior of re-running only the deploy job and whether a
+re-run waits behind a running run in the concurrency group; the API's newest-first ordering (checked, never trusted) and the exact step records of
+cancelled jobs; the test suite's duration on the runner; and the workflow itself, which was not run.

@@ -143,8 +143,34 @@ def test_the_old_smoke_test_that_could_not_tell_stale_from_new_is_gone():
 
 
 def test_the_deploy_job_has_only_the_permissions_it_needs():
-    assert DEPLOY["permissions"] == {"contents": "read", "pages": "write", "id-token": "write"}
+    """actions: read is the one permission the run-history guard adds (it reads this workflow's runs and jobs); nothing writes."""
+    assert DEPLOY["permissions"] == {"actions": "read", "contents": "read", "pages": "write", "id-token": "write"}
     assert DEPLOY["environment"]["name"] == "github-pages"
+    assert "actions" not in BUILD["permissions"] and WF["permissions"] == {"contents": "read"}, "no other job or the workflow gains it"
+
+
+def test_the_run_history_guard_runs_first_with_minimal_wiring_and_no_first_release_exemption():
+    rg, cdn, d = index(DEPLOY, "pipeline.run_guard"), index(DEPLOY, "pipeline.live_check guard"), index(DEPLOY, "deploy-pages")
+    assert index(DEPLOY, "actions/checkout") < rg < cdn < d, "checkout, then the API guard, then the CDN guard, then the deployment"
+    s = DEPLOY["steps"][rg]
+    assert "if" not in s and "continue-on-error" not in s
+    assert s["env"] == {"GH_TOKEN": "${{ github.token }}", "REPO": "${{ github.repository }}", "RUN_ID": "${{ github.run_id }}"}
+    assert s["run"].strip() == 'python3 -m pipeline.run_guard --repo "$REPO" --run-id "$RUN_ID"'
+    assert "first_release" not in str(s).lower() and "first-release" not in str(s).lower() and "FIRST_RELEASE" not in str(s)
+    assert "secrets." not in yaml.safe_dump(DEPLOY), "the job's own token is the only credential the deploy job uses"
+    assert index(DEPLOY, "pipeline.live_check guard") > rg, "the CDN guard is still there, after it"
+
+
+def test_the_names_the_run_history_guard_reads_are_pinned_to_the_workflow():
+    from pipeline import run_guard
+    assert DEPLOY["name"] == run_guard.DEPLOY_JOB_NAME
+    deploy_steps = [s for s in DEPLOY["steps"] if (s.get("uses") or "").startswith("actions/deploy-pages@")]
+    assert len(deploy_steps) == 1
+    assert deploy_steps[0]["name"] == run_guard.DEPLOY_STEP_NAME and deploy_steps[0]["id"] == "deployment"
+    assert [s.get("name") for s in DEPLOY["steps"]].count(run_guard.DEPLOY_STEP_NAME) == 1
+    assert run_guard.WORKFLOW_PATH == ".github/workflows/refresh.yml" and (ROOT / run_guard.WORKFLOW_PATH).is_file()
+    assert run_guard.WORKFLOW_FILE == Path(run_guard.WORKFLOW_PATH).name
+    assert "deploy" in WF["jobs"] and list(WF["jobs"]) == ["build", "deploy"]
 
 
 def test_nothing_in_the_workflow_deploys_except_the_one_deploy_step():
@@ -156,9 +182,11 @@ def test_nothing_in_the_workflow_deploys_except_the_one_deploy_step():
 
 
 def test_the_checks_the_workflow_runs_exist_and_use_only_the_standard_library_where_nothing_is_installed():
-    src = (ROOT / "pipeline" / "live_check.py").read_text(encoding="utf-8")
-    imported = {l.split()[1].split(".")[0] for l in src.splitlines() if l.startswith(("import ", "from ")) and not l.startswith("from __future__")}
-    assert imported <= {"argparse", "base64", "datetime", "hashlib", "http", "json", "sys", "time", "urllib", "dataclasses", "typing"}, imported
+    allowed = {"argparse", "base64", "datetime", "hashlib", "http", "json", "os", "re", "sys", "time", "urllib", "dataclasses", "typing"}
+    for module in ("live_check.py", "run_guard.py"):
+        src = (ROOT / "pipeline" / module).read_text(encoding="utf-8")
+        imported = {l.split()[1].split(".")[0] for l in src.splitlines() if l.startswith(("import ", "from ")) and not l.startswith("from __future__")}
+        assert imported <= allowed, (module, imported)
 
 
 def test_the_build_timeout_covers_the_google_budget_the_full_suite_and_a_margin():
