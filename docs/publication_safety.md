@@ -92,9 +92,11 @@ A newer run counts as follows:
 |---|---|
 | its deploy job's `Deploy to GitHub Pages` step concluded `success` in any attempt, even if the live check after it failed | **refused**: it published |
 | that step is running | **refused**: it is deploying |
-| that step ended `failure`, `cancelled`, `timed_out` or anything unclear, or a deploy job that started but recorded no steps | **refused**: it may have gone live, and uncertain history never authorizes an older publication |
+| that step ended `failure`, `cancelled`, `timed_out` or anything unclear (a step record means the job had begun running), or a deploy job that failed or timed out after starting without recording any step | **refused**: it may have gone live, and uncertain history never authorizes an older publication |
 | the run itself is executing (any step) | **refused**: runs are serialized by the concurrency group, so an executing newer run means that assumption failed |
 | a preview (the deploy job was skipped), a run that failed before the deployment step, a deploy step skipped | allowed: it never reached deployment |
+| a deploy job that was **cancelled and recorded no step** | allowed: a job that began running lists every one of its steps, so no records means no step began (with or without a start time) |
+| a run that was **cancelled or failed to start and has no job of any attempt** (for example a pending run replaced by a newer dispatch while this run was running) | allowed: nothing of it ever ran. Any other conclusion with no jobs, or a cancelled run that has other jobs but no deploy job, still refuses (a renamed deploy job could be hiding a deployment) |
 | queued, waiting or pending, no evidence it reached deployment | allowed: it waits behind this run and, if it ever deploys, it is newer, so this run publishing first does no harm |
 
 Re-runs keep their run id, so re-running the **newest** run is allowed (nothing is newer; its own earlier attempts are never examined) and
@@ -135,6 +137,8 @@ this guard on its own. The run-history guard above does not depend on cached fil
 - The run-history guard sees only this workflow's runs. A deployment made some other way (another workflow, a manual Pages action) is visible to
   the CDN guard only.
 - A newer run that is merely queued does not block (see the table), by design.
+- If a newer run was cancelled while its deploy job was in its first seconds, the deploy step may be recorded as cancelled although it never
+  started. That refuses this (older) run, which is safe; the operator dispatches a new run. It cannot happen to the newest run, which nothing can refuse.
 
 ## The live check
 
@@ -217,5 +221,8 @@ today's guard would refuse an older re-run against them with an "unexpected step
 Assumed, not verified: GitHub Pages switches deployments atomically and a failed `deploy-pages` leaves the previous one active; the CDN's timing
 after a deploy (copies seen up to about 10 minutes old); the artifact retention limits that apply to this repository; that a re-run uses the original
 commit's workflow file; that Python receives the runner's SIGINT through the step's shell; the behavior of re-running only the deploy job and whether a
-re-run waits behind a running run in the concurrency group; the API's newest-first ordering (checked, never trusted) and the exact step records of
-cancelled jobs; the test suite's duration on the runner; and the workflow itself, which was not run.
+re-run waits behind a running run in the concurrency group; the API's newest-first ordering (checked, never trusted); what the API shows for a
+pending run that the concurrency group replaced (public repositories show cancelled runs with no jobs at all, and cancelled jobs with a start time and
+no step records, and show running jobs listing every step up front; that is the evidence for the two "never started" rules, but this repository's own
+replaced runs have not been seen); how a job cancelled in its first seconds labels its deploy step; the test suite's duration on the runner; and the
+workflow itself, which was not run.

@@ -241,6 +241,67 @@ def test_a_deploy_job_that_started_but_recorded_no_steps_is_unclear_and_blocks()
     assert d.ok
 
 
+# ---------- runs replaced or cancelled before they started (the double-dispatch case) ----------
+# Shapes seen in the public API: a cancelled run can have no jobs at all (total_count 0), and a cancelled job can have a start time and no
+# step records, because a job that began running lists every step (later ones as pending).
+
+CANCELLED_NO_JOBS = lambda rid=300, conclusion="cancelled": (run(rid, status="completed", conclusion=conclusion), [])
+CANCELLED_JOB_NO_STEPS = lambda started=True: dict(deploy_job(steps=[], status="completed", conclusion="cancelled", started=started))
+
+
+@pytest.mark.parametrize("conclusion", ["cancelled", "startup_failure"])
+def test_a_newer_run_that_never_had_a_job_does_not_refuse_the_running_older_run(conclusion):
+    d, fake, _ = decide([CANCELLED_NO_JOBS(300, conclusion), me()])
+    assert d.ok, d.message
+
+
+def test_the_double_dispatch_history_is_allowed_a_running_b_replaced_c_queued():
+    """A is running, B was dispatched and queued, C was dispatched and replaced B (B cancelled, no jobs), C waits behind A."""
+    d, fake, _ = decide([queued(302, with_jobs=False), CANCELLED_NO_JOBS(301), me(), published(150)])
+    assert d.ok, d.message
+    assert any("/runs/301/jobs" in u for u, _, _ in fake.requests), "the cancelled run's jobs were read, not assumed"
+
+
+@pytest.mark.parametrize("conclusion", ["success", "failure", "timed_out", "neutral", "action_required", None])
+def test_a_completed_run_with_no_jobs_and_any_other_conclusion_still_refuses(conclusion):
+    d, _, _ = decide([(run(300, status="completed", conclusion=conclusion), []), me()])
+    assert not d.ok and "no job named 'Publish to GitHub Pages'" in d.message
+
+
+def test_a_cancelled_run_that_has_other_jobs_but_no_deploy_job_still_refuses():
+    """Only a run with no job at all is 'never started'; otherwise a renamed deploy job could be hiding a deployment."""
+    d, _, _ = decide([(run(300, status="completed", conclusion="cancelled"), [build_job(("completed", "cancelled"))]), me()])
+    assert not d.ok and "no job named" in d.message
+
+
+@pytest.mark.parametrize("started", [True, False])
+def test_a_cancelled_deploy_job_that_recorded_no_step_does_not_block_with_or_without_a_start_time(started):
+    d, _, _ = decide([(run(300, status="completed", conclusion="cancelled"), [build_job(("completed", "cancelled")), CANCELLED_JOB_NO_STEPS(started)]), me()])
+    assert d.ok, d.message
+
+
+@pytest.mark.parametrize("conclusion", ["failure", "timed_out"])
+def test_a_started_deploy_job_that_failed_or_timed_out_recording_no_step_still_blocks_with_an_honest_message(conclusion):
+    job = deploy_job(steps=[], status="completed", conclusion=conclusion, started=True)
+    d, _, _ = decide([(run(300, conclusion="failure"), [build_job(), job]), me()])
+    assert not d.ok and "outcome is unclear" in d.message
+    assert f"its deploy job ended {conclusion} without recording any step" in d.message
+    assert "deployment step ended unclear" not in d.message
+
+
+def test_a_run_that_deployed_in_an_earlier_attempt_still_blocks_even_if_a_later_attempt_was_cancelled_with_no_jobs():
+    jobs = [build_job(), deploy_job(attempt=1)]                       # attempt 1 deployed; attempt 2 left no job of its own
+    d, _, _ = decide([(run(300, status="completed", conclusion="cancelled"), jobs), me()])
+    assert not d.ok and "has already deployed" in d.message
+
+
+def test_a_cancelled_deploy_job_that_did_record_its_deploy_step_as_cancelled_still_blocks():
+    """A step record means the job had begun running; a deploy step cancelled while it ran may have gone live."""
+    steps = [step("Set up job"), step(STEP, CANCEL), step("Verify the live site serves the candidate report", SKIP)]
+    d, _, _ = decide([(run(300, status="completed", conclusion="cancelled"), [build_job(), deploy_job(steps=steps, conclusion="cancelled")]), me()])
+    assert not d.ok and "outcome is unclear" in d.message and "cancelled" in d.message
+
+
 def test_the_newest_run_can_proceed_when_nothing_is_newer():
     d, fake, _ = decide([me(), published(150)])
     assert d.ok and "0 newer run(s)" in d.message

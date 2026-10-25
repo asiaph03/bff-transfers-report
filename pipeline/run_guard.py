@@ -56,6 +56,7 @@ MAX_BODY = 5_000_000
 
 RUN_NOT_STARTED = {"queued", "requested", "waiting", "pending"}
 RUN_STATUSES = RUN_NOT_STARTED | {"in_progress", "completed"}
+NEVER_STARTED = ("cancelled", "startup_failure")      # a completed run with no job at all and one of these conclusions never ran anything
 JOB_NOT_STARTED = {"queued", "waiting", "pending", "requested"}
 JOB_STATUSES = JOB_NOT_STARTED | {"in_progress", "completed"}
 SEVERITY = {"deployed": 4, "in-flight": 3, "active": 2, "ambiguous": 1, "none": 0}
@@ -264,13 +265,14 @@ def _job_state(job: dict, run_id: int) -> str:
         return _step_state(named[0])
     if steps:
         raise GuardError(f"run {run_id}: the deploy job has no step named '{DEPLOY_STEP_NAME}' (renamed?), so a deployment cannot be ruled out")
-    # no step records at all
+    # no step records at all. A job that began running lists every one of its steps (later ones as pending), so no records means no step
+    # began: a skipped job (a preview) or a job cancelled before a runner took it never ran the deploy step, whether or not it has a start time.
     if status == "completed":
-        if conclusion == "skipped":
-            return "none"                   # a preview run: the deploy job never started
+        if conclusion in ("skipped", "cancelled"):
+            return "none"
         if conclusion == "success":
             return "deployed"               # a successful job cannot have skipped its deploy step
-        return "ambiguous" if job.get("started_at") else "none"
+        return "ambiguous" if job.get("started_at") else "none"   # failed or timed out after starting, recording nothing: unclear
     if status in JOB_NOT_STARTED:
         return "none"
     return "in-flight"                      # in progress with no step list yet
@@ -283,6 +285,8 @@ def classify_run(run: dict, jobs: list) -> tuple:
         raise GuardError(f"run {rid}: unknown run state")
     deploy_jobs = [j for j in jobs if j.get("name") == DEPLOY_JOB_NAME]
     if not deploy_jobs and status == "completed":
+        if not jobs and run.get("conclusion") in NEVER_STARTED:
+            return "none", ""               # cancelled (for instance a pending run replaced by a newer dispatch) before any job of any attempt existed
         raise GuardError(f"run {rid}: no job named '{DEPLOY_JOB_NAME}', so a preview cannot be told from a publication")
     verdicts = [_job_state(j, rid) for j in deploy_jobs]
     if status == "in_progress":
@@ -291,7 +295,10 @@ def classify_run(run: dict, jobs: list) -> tuple:
     if verdict == "ambiguous":
         step_conclusions = sorted({re.sub(r"[^a-z_]", "", str(s.get("conclusion") or s.get("status") or ""))
                                    for j in deploy_jobs for s in (j.get("steps") or []) if isinstance(s, dict) and s.get("name") == DEPLOY_STEP_NAME})
-        return verdict, "its deployment step ended " + ("/".join(c for c in step_conclusions if c) or "unclear")
+        if any(c for c in step_conclusions):
+            return verdict, "its deployment step ended " + "/".join(c for c in step_conclusions if c)
+        ended = sorted({re.sub(r"[^a-z_]", "", str(j.get("conclusion") or j.get("status") or "")) for j in deploy_jobs} - {""})
+        return verdict, "its deploy job ended " + ("/".join(ended) or "unclear") + " without recording any step"
     return verdict, ""
 
 
