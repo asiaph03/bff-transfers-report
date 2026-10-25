@@ -5,10 +5,15 @@ that moves a check after the upload, drops a job output or adds a schedule fails
 """
 from __future__ import annotations
 
+import re
+import shlex
 from pathlib import Path
 
 import pytest
 import yaml
+
+from pipeline import live_check
+from pipeline.test_live_check import Site, dash_first_report, now_iso, report
 
 ROOT = Path(__file__).resolve().parent.parent
 WORKFLOWS = ROOT / ".github" / "workflows"
@@ -133,8 +138,98 @@ def test_the_live_check_runs_after_the_deployment_with_the_candidate_values_and_
     for key, out in (("CANDIDATE_REFRESHED_AT", "refreshed_at"), ("CANDIDATE_VERSION", "version"), ("CANDIDATE_DATA_BYTES", "data_bytes"), ("CANDIDATE_ROWS", "rows")):
         assert s["env"][key] == "${{ needs.build.outputs." + out + " }}"
     assert s["env"]["LIVE_URL"] == "${{ steps.deployment.outputs.page_url }}"
-    assert "--deadline 720" in s["run"]
+    assert "--deadline=720" in s["run"]
     assert DEPLOY["timeout-minutes"] >= 20, "room for the guard, the deployment and 12 minutes of waiting"
+
+
+# ---------- how the workflow hands values to the checks (--name=value, never --name value) ----------
+# A report version is base64url, so it starts with "-" about one time in 64, and argparse reads "--version -Abc..." as a missing value.
+# These tests take the real command lines out of the workflow, fill in the variables the way the shell would, and run the real
+# command-line parsers with a dash-first version, so a regression to the space-separated form fails here and not after a deployment.
+
+def commands(step, module):
+    """The `python3 -m pipeline.<module>` lines of a step's script, with line continuations joined and comments dropped."""
+    lines = [l.strip() for l in step["run"].replace("\\\n", " ").splitlines() if l.strip() and not l.strip().startswith("#")]
+    found = [l for l in lines if l.startswith(f"python3 -m pipeline.{module} ")]
+    assert len(found) == 1, (module, lines)
+    return found[0]
+
+
+def argv_of(command, env):
+    """What the program receives: $NAME replaced by its value, then split with the shell's quoting rules (quotes removed)."""
+    expanded = re.sub(r"\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?", lambda m: env[m.group(1)], command)
+    words = shlex.split(expanded)
+    assert words[:2] == ["python3", "-m"], words
+    return words[3:]
+
+
+def live_check_step(subcommand):
+    return step(DEPLOY, f"pipeline.live_check {subcommand}")
+
+
+def test_every_value_passed_to_the_checks_is_attached_to_its_option_with_an_equals_sign():
+    for s, module in ((step(DEPLOY, "pipeline.run_guard"), "run_guard"), (live_check_step("guard"), "live_check"), (live_check_step("verify"), "live_check")):
+        words = shlex.split(commands(s, module))[3:]
+        if module == "live_check":
+            assert words.pop(0) in ("guard", "verify")
+        for w in words:
+            assert w == "$FLAG" or w == "--first-release" or re.fullmatch(r"--[a-z][a-z-]*=.+", w), f"{module}: {w!r} is not --name=value"
+        assert not any(w.startswith("-") and "=" not in w and w != "--first-release" for w in words)
+
+
+def test_the_verify_command_of_the_workflow_verifies_a_dash_first_version(monkeypatch, capsys):
+    summary, raw, e = dash_first_report(now_iso(1))
+    s = live_check_step("verify")
+    env = {"LIVE_URL": "https://example.invalid/site/", "CANDIDATE_REFRESHED_AT": e["refreshed_at"], "CANDIDATE_VERSION": e["version"],
+           "CANDIDATE_DATA_BYTES": str(e["data_bytes"]), "CANDIDATE_ROWS": str(e["rows"])}
+    assert set(env) == set(s["env"]), "the test supplies exactly the variables the step defines"
+    argv = argv_of(commands(s, "live_check"), env)
+    assert e["version"].startswith("-") and f"--version={e['version']}" in argv
+    live = Site()
+    live.put(summary=summary, data=raw)
+    monkeypatch.setattr(live_check, "http_fetch", live)
+    argv = [w for w in argv if not w.startswith(("--deadline=", "--interval="))] + ["--deadline=1", "--interval=0.2"]      # only the waiting is shortened
+    assert live_check.main(argv) == 0
+    assert "LIVE CHECK PASSED" in capsys.readouterr().out and live.requests
+    other = Site()                                      # the dash-first version is the value that is compared
+    other.put(*report(e["refreshed_at"], n=4)[:2])
+    monkeypatch.setattr(live_check, "http_fetch", other)
+    assert live_check.main(argv) == 1
+
+
+def test_the_old_space_separated_verify_command_fails_to_parse_with_a_dash_first_version(monkeypatch, capsys):
+    """The regression this section guards against: the same command with `--version "$CANDIDATE_VERSION"` exits with a usage error."""
+    _, _, e = dash_first_report(now_iso(1))
+    s = live_check_step("verify")
+    env = {"LIVE_URL": "https://example.invalid/site/", "CANDIDATE_REFRESHED_AT": e["refreshed_at"], "CANDIDATE_VERSION": e["version"],
+           "CANDIDATE_DATA_BYTES": str(e["data_bytes"]), "CANDIDATE_ROWS": str(e["rows"])}
+    old = commands(s, "live_check").replace('--version="$CANDIDATE_VERSION"', '--version "$CANDIDATE_VERSION"')
+    assert old != commands(s, "live_check"), "the workflow passes the version as --version=..."
+    with pytest.raises(SystemExit) as exc:
+        live_check.main(argv_of(old, env))
+    assert exc.value.code == 2 and "--version" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("first_release", [False, True])
+def test_the_cdn_guard_command_of_the_workflow_parses_and_decides(monkeypatch, capsys, first_release):
+    s = live_check_step("guard")
+    at = now_iso(1)
+    env = {"SITE_URL": "https://example.invalid/site/", "CANDIDATE_REFRESHED_AT": at, "FLAG": "--first-release" if first_release else ""}
+    assert set(s["env"]) <= set(env) | {"FIRST_RELEASE"}
+    monkeypatch.setattr(live_check, "http_fetch", Site())                    # an unreadable live site: refused unless this is the first release
+    assert live_check.main(argv_of(commands(s, "live_check"), env)) == (0 if first_release else 1)
+
+
+def test_the_run_guard_command_of_the_workflow_parses(monkeypatch, capsys):
+    from pipeline import run_guard
+    s = step(DEPLOY, "pipeline.run_guard")
+    env = {"REPO": "owner/repo", "RUN_ID": "123", "GH_TOKEN": "x"}
+    assert set(s["env"]) == set(env)
+    argv = argv_of(commands(s, "run_guard"), env)
+    assert argv == ["--repo=owner/repo", "--run-id=123"]
+    monkeypatch.delenv("GH_TOKEN", raising=False)
+    assert run_guard.main(argv) == 1                         # parsed; stopped at the missing token before any network use
+    assert "GH_TOKEN is not set" in capsys.readouterr().out
 
 
 def test_the_old_smoke_test_that_could_not_tell_stale_from_new_is_gone():
@@ -155,7 +250,7 @@ def test_the_run_history_guard_runs_first_with_minimal_wiring_and_no_first_relea
     s = DEPLOY["steps"][rg]
     assert "if" not in s and "continue-on-error" not in s
     assert s["env"] == {"GH_TOKEN": "${{ github.token }}", "REPO": "${{ github.repository }}", "RUN_ID": "${{ github.run_id }}"}
-    assert s["run"].strip() == 'python3 -m pipeline.run_guard --repo "$REPO" --run-id "$RUN_ID"'
+    assert s["run"].strip() == 'python3 -m pipeline.run_guard --repo="$REPO" --run-id="$RUN_ID"'
     assert "first_release" not in str(s).lower() and "first-release" not in str(s).lower() and "FIRST_RELEASE" not in str(s)
     assert "secrets." not in yaml.safe_dump(DEPLOY), "the job's own token is the only credential the deploy job uses"
     assert index(DEPLOY, "pipeline.live_check guard") > rg, "the CDN guard is still there, after it"

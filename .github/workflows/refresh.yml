@@ -150,7 +150,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           RUN_ID: ${{ github.run_id }}
-        run: python3 -m pipeline.run_guard --repo "$REPO" --run-id "$RUN_ID"
+        run: python3 -m pipeline.run_guard --repo="$REPO" --run-id="$RUN_ID"
 
       # Never deploy an older report over a newer one, and fail closed when the live report cannot be read or trusted
       # (only a run started with first_release skips the comparison). Runs before anything is deployed.
@@ -162,7 +162,7 @@ jobs:
         run: |
           FLAG=""
           if [ "$FIRST_RELEASE" = "true" ]; then FLAG="--first-release"; fi
-          python3 -m pipeline.live_check guard --url "$SITE_URL" --candidate-refreshed-at "$CANDIDATE_REFRESHED_AT" $FLAG
+          python3 -m pipeline.live_check guard --url="$SITE_URL" --candidate-refreshed-at="$CANDIDATE_REFRESHED_AT" $FLAG
 
       # The name is read by the run-history guard (pipeline/run_guard.py) of later runs: change it only together with DEPLOY_STEP_NAME there.
       - name: Deploy to GitHub Pages
@@ -178,5 +178,7 @@ jobs:
           CANDIDATE_DATA_BYTES: ${{ needs.build.outputs.data_bytes }}
           CANDIDATE_ROWS: ${{ needs.build.outputs.rows }}
         run: |
-          python3 -m pipeline.live_check verify --url "$LIVE_URL" --refreshed-at "$CANDIDATE_REFRESHED_AT" --version "$CANDIDATE_VERSION" \
-            --data-bytes "$CANDIDATE_DATA_BYTES" --rows "$CANDIDATE_ROWS" --deadline 720 --interval 30
+          # Every value is passed as --name=value: a report version is base64url and starts with "-" about one time in 64, and
+          # argparse would read "--version -abc..." as a missing value and fail the check after a successful deployment.
+          python3 -m pipeline.live_check verify --url="$LIVE_URL" --refreshed-at="$CANDIDATE_REFRESHED_AT" --version="$CANDIDATE_VERSION" \
+            --data-bytes="$CANDIDATE_DATA_BYTES" --rows="$CANDIDATE_ROWS" --deadline=720 --interval=30

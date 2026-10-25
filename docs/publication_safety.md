@@ -26,6 +26,12 @@ Refresh dashboard (manual only; one run at a time, see "Queueing")
 Steps 4 to 8 run only if every earlier step succeeded: none of the gating steps uses `always()`, `failure()` or `continue-on-error`, and
 the deploy job needs a successful build job (all checked by `pipeline/test_workflow.py`).
 
+The workflow passes every value to `run_guard` and `live_check` as `--name=value`, never `--name value`. A report version is a base64url
+string, so about one report in 64 has a version that starts with `-`, which the argument parser would take for an option: with the
+space-separated form the live check would stop with a usage error (exit 2) after a successful deployment. `pipeline/test_workflow.py` takes
+the real command lines out of the workflow and runs them through the real parsers with a dash-first version; a change back to the
+space-separated form fails there. The report version itself, its hash and the manifest are unchanged.
+
 ## What stops a bad report
 
 | Check | Where | Stops |
@@ -189,10 +195,11 @@ candidate's `refreshed_at` and `version` so the right copy can be found. None of
       and `--config` pointing at files you trust is a weaker check (the page comparison becomes trivial); say so when reporting.
    6. *Optionally compare with what is live now* (read-only requests):
       ```
-      .venv/bin/python -m pipeline.live_check verify --url https://<owner>.github.io/<repo>/ --refreshed-at <time> --version <version> \
-        --data-bytes <bytes> --rows <rows> --deadline 1
+      .venv/bin/python -m pipeline.live_check verify --url=https://<owner>.github.io/<repo>/ --refreshed-at=<time> --version=<version> \
+        --data-bytes=<bytes> --rows=<rows> --deadline=1
       ```
-      `LIVE CHECK PASSED` means the live site serves exactly that report; a failure only tells you it does not (its warning about a deployment
+      Keep the `--name=value` form, above all for `--version`: a report version is base64url and starts with `-` about one time in 64, and
+      `--version -Abc...` (with a space) is read as a missing value and fails with a usage error. `LIVE CHECK PASSED` means the live site serves exactly that report; a failure only tells you it does not (its warning about a deployment
       refers to the deploy job and does not apply when you run it by hand).
 4. **Redeploy the same newest report** (a deployment or live check failed): on that run, choose **Re-run failed jobs**. Both guards allow it: the
    run keeps its id (nothing is newer) and its timestamp (the same report again). This works only while that run's Pages artifact still exists

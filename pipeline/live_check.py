@@ -3,6 +3,8 @@
     python -m pipeline.live_check guard  --url URL --candidate-refreshed-at TIME [--first-release]
     python -m pipeline.live_check verify --url URL --refreshed-at TIME --version V --data-bytes N --rows N
 
+Pass values as --name=value (--version=-Abc...): a report version can start with "-", which argparse would take for an option.
+
 guard   runs BEFORE deploy-pages. It refuses to deploy an older report over a newer one and fails closed when the live
         report cannot be read or trusted, except on the explicitly selected first-release path.
 verify  runs AFTER deploy-pages. It asks the live site, for up to about 12 minutes (the CDN may keep serving old files),

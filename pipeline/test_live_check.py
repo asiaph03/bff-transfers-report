@@ -40,6 +40,28 @@ def report(refreshed_at: str, n: int = 3, tweak=None):
     return summary, raw, {"refreshed_at": refreshed_at, "version": version, "data_bytes": len(raw), "rows": n}
 
 
+def dash_first_report(refreshed_at: str):
+    """A made-up report whose version starts with "-" (base64url's alphabet includes it: about 1 report in 64).
+
+    Found by counting up a padding field, so it is the same report on every run: the hash is deterministic, nothing is random."""
+    for k in range(5000):
+        summary, raw, expected = report(refreshed_at, tweak=lambda d: d.update(pad=k))
+        if expected["version"].startswith("-"):
+            return summary, raw, expected
+    raise AssertionError("no dash-first version in 5000 tries: the version alphabet or hash changed")
+
+
+def verify_args(url, refreshed_at, version, data_bytes, rows, *, deadline="720", interval="30", equals=True):
+    """The `verify` command line exactly as the workflow writes it: every value attached to its option as --name=value.
+
+    `equals=False` is the old space-separated form, kept only to prove why the workflow must not use it."""
+    pairs = [("--url", url), ("--refreshed-at", refreshed_at), ("--version", version), ("--data-bytes", str(data_bytes)), ("--rows", str(rows)),
+             ("--deadline", deadline), ("--interval", interval)]
+    if equals:
+        return ["verify"] + [f"{k}={v}" for k, v in pairs]
+    return ["verify"] + [part for pair in pairs for part in pair]
+
+
 class Site:
     """A fake site. `serve(url)` -> (status, body); a function of time lets a test script cache lag and propagation."""
 
@@ -160,6 +182,50 @@ def test_the_guard_command_line_uses_the_exit_code(monkeypatch, capsys):
     assert live_check.main(["guard", "--url", URL, "--candidate-refreshed-at", just_now, "--first-release"]) == 0
     out = capsys.readouterr().out
     assert "REFUSED" in out and "ALLOWED" in out
+
+
+# ---------- the command line exactly as the workflow writes it (--name=value) ----------
+
+def now_iso(minutes_ago: float) -> str:
+    return (dt.datetime.now(dt.timezone.utc) - dt.timedelta(minutes=minutes_ago)).replace(microsecond=0).isoformat()      # the commands use the real clock
+
+
+def test_the_guard_command_accepts_the_equals_form(monkeypatch, capsys):
+    monkeypatch.setattr(live_check, "http_fetch", Site())
+    at = now_iso(1)
+    assert live_check.main(["guard", f"--url={URL}", f"--candidate-refreshed-at={at}"]) == 1
+    assert live_check.main(["guard", f"--url={URL}", f"--candidate-refreshed-at={at}", "--first-release"]) == 0
+    assert "REFUSED" in capsys.readouterr().out
+
+
+def test_a_report_version_can_start_with_a_dash():
+    _, raw, expected = dash_first_report(iso(1))
+    assert expected["version"].startswith("-") and len(expected["version"]) == 24
+    assert expected["version"] == build.report_version(raw) == live_check.version_of(raw)
+
+
+def test_the_space_separated_form_cannot_carry_a_dash_first_version(capsys):
+    """Pins the hazard behind the workflow's --name=value form: argparse reads "-Abc..." as an option, not as the value of --version,
+    so the old `--version "$CANDIDATE_VERSION"` failed the live check (exit 2, after a successful deployment) for about 1 report in 64."""
+    _, _, e = dash_first_report(now_iso(1))
+    with pytest.raises(SystemExit) as exc:
+        live_check.main(verify_args(URL, e["refreshed_at"], e["version"], e["data_bytes"], e["rows"], equals=False))
+    assert exc.value.code == 2
+    assert "--version" in capsys.readouterr().err
+
+
+def test_the_verify_command_accepts_a_dash_first_version_in_the_workflow_form(monkeypatch, capsys):
+    summary, raw, e = dash_first_report(now_iso(1))
+    live = Site()
+    live.put(summary=summary, data=raw)
+    monkeypatch.setattr(live_check, "http_fetch", live)
+    assert live_check.main(verify_args(URL, e["refreshed_at"], e["version"], e["data_bytes"], e["rows"], deadline="1", interval="0.2")) == 0
+    assert "LIVE CHECK PASSED" in capsys.readouterr().out and live.requests, "the check really read the site"
+    # and the dash-first version really is the value compared: a site serving another report does not pass
+    other = Site()
+    other.put(*report(e["refreshed_at"], n=4)[:2])
+    monkeypatch.setattr(live_check, "http_fetch", other)
+    assert live_check.main(verify_args(URL, e["refreshed_at"], e["version"], e["data_bytes"], e["rows"], deadline="1", interval="0.2")) == 1
 
 
 # ---------- the live verification ----------
@@ -354,9 +420,8 @@ def test_simulated_deployment_guard_then_deploy_then_verify(two_sites, served, c
     assert live_check.main(["guard", "--url", url, "--candidate-refreshed-at", o.refreshed_at]) == 1
     assert live_check.main(["guard", "--url", url, "--candidate-refreshed-at", o.refreshed_at, "--first-release"]) == 0
     deploy(old, live_root)
-    args = lambda i: ["verify", "--url", url, "--refreshed-at", i.refreshed_at, "--version", i.version, "--data-bytes", str(i.data_bytes), "--rows", str(i.rows),
-                      "--deadline", "1", "--interval", "0.2"]
-    assert live_check.main(args(o)) == 0                                                      # the deployed report verifies
+    args = lambda i: verify_args(url, i.refreshed_at, i.version, i.data_bytes, i.rows, deadline="1", interval="0.2")
+    assert live_check.main(args(o)) == 0                                                     # the deployed report verifies
     assert live_check.main(args(n)) == 1                                                      # the candidate is not live yet
     assert live_check.main(["guard", "--url", url, "--candidate-refreshed-at", n.refreshed_at]) == 0       # newer: allowed
     deploy(new, live_root)
@@ -373,8 +438,7 @@ def test_simulated_post_deployment_mismatch_is_reported_not_hidden(two_sites, se
     n = info(new)
     deploy(new, live_root)
     (live_root / "data.json").write_bytes((live_root / "data.json").read_bytes().replace(b"P", b"Q", 1))      # altered in transit
-    rc = live_check.main(["verify", "--url", url, "--refreshed-at", n.refreshed_at, "--version", n.version, "--data-bytes", str(n.data_bytes),
-                          "--rows", str(n.rows), "--deadline", "1", "--interval", "0.2"])
+    rc = live_check.main(verify_args(url, n.refreshed_at, n.version, n.data_bytes, n.rows, deadline="1", interval="0.2"))
     out = capsys.readouterr().out
     assert rc == 1 and "does not hash to the manifest" in out and "MAY ALREADY HAVE HAPPENED" in out and "does not roll anything back" in out
 
