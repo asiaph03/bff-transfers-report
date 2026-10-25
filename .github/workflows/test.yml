@@ -22,5 +22,45 @@ jobs:
           cache: pip
           cache-dependency-path: pipeline/requirements.txt
       - run: pip install -r pipeline/requirements.txt
-      - run: python -m pytest -q pipeline
+      # -ra lists every skipped, failed or errored test in the log; the JUnit report is read by the next step. A pytest failure fails this
+      # step and stops the job, so a later step can never turn it into a pass.
+      - run: python -m pytest -q -ra --junitxml=pytest-results.xml pipeline
+      # Skipped tests exit 0, so only the report can show that the two symlink tests really ran (they skip where symlinks are unavailable).
+      - name: Require the symlink tests to have run and passed on Linux
+        run: |
+          python - <<'PY'
+          import os
+          import platform
+          import sys
+          import xml.etree.ElementTree as ET
+
+          REQUIRED = [("pipeline.test_verify_site", "test_a_symbolic_link_is_rejected"),
+                      ("pipeline.test_verify_site", "test_remove_build_output_never_follows_a_link")]
+          try:
+              cases = list(ET.parse("pytest-results.xml").getroot().iter("testcase"))
+          except (OSError, ET.ParseError) as e:
+              print(f"::error title=Symlink tests could not be checked::cannot read pytest-results.xml: {e}")
+              sys.exit(1)
+          lines, bad = [], []
+          if not sys.platform.startswith("linux"):
+              bad.append(f"not running on Linux ({sys.platform})")
+          for classname, name in REQUIRED:
+              found = [c for c in cases if c.get("classname") == classname and c.get("name") == name]
+              if len(found) != 1:
+                  bad.append(f"{name}: found {len(found)} times in the results, expected exactly 1")
+                  continue
+              outcome = {child.tag for child in found[0]} & {"failure", "error", "skipped"}
+              status = "PASSED" if not outcome else "/".join(sorted(outcome)).upper()
+              lines.append(f"{status} {classname.replace('.', '/')}.py::{name}")
+              if outcome:
+                  bad.append(f"{name}: {status}")
+          summary = f"Symlink tests on {platform.platform()}: " + "; ".join(lines)
+          print(summary)
+          with open(os.environ.get("GITHUB_STEP_SUMMARY", os.devnull), "a", encoding="utf-8") as f:
+              f.write("### Symlink tests\n" + "".join(f"- `{l}`\n" for l in lines) + f"- {platform.platform()}, Python {platform.python_version()}\n")
+          if bad:
+              print("::error title=Symlink tests did not run and pass::" + "; ".join(bad))
+              sys.exit(1)
+          print("::notice title=Symlink tests::" + summary)
+          PY
       - run: python -m pipeline.build --check-config
