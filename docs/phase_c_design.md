@@ -169,7 +169,7 @@ flowchart LR
   VAL -->|fail| KEEP[keep last known good\nstatus = failed or stale]
   PUB --> API[Cloud Run service: FastAPI\n/dashboard /status /version]
   KEEP --> API
-  API -->|poll 15 s, fetch on version change| FE[GitHub Pages dashboard]
+  API -->|poll 60 s, fetch on version change| FE[GitHub Pages dashboard]
 ```
 
 Single-flight: an advisory lock (or a conditional write to the run table) ensures two jobs never run at once.
@@ -339,7 +339,7 @@ definition; it is deliberately not carried across runs, because humans can inser
 ## 10. Is the existing PostgreSQL/RDS suitable? Options
 
 Workload (Stage 2): staging up to about 1M rows x 5 sources per run, 3 runs retained, 8,640 runs per month at a
-5-minute cadence (2,880 at 15 minutes); output 300 rows per version; API polling every 15 s per open dashboard.
+5-minute cadence (2,880 at 15 minutes); output 300 rows per version; API polling every 60 s per open dashboard.
 
 | Option | Fit | Main concerns |
 |---|---|---|
@@ -387,7 +387,7 @@ official pricing pages could not be fetched here. Treat as estimates, not quotes
 | Cloud Run job, 1 vCPU / 1 GiB, 10 min per run (measured Sheets reads dominate) | $0.000018 per vCPU-s, $0.000002 per GiB-s; free 240,000 vCPU-s and 450,000 GiB-s per month | hourly cadence about **$3.5**/month; 15-minute cadence about **$29**/month; skip-when-unchanged with a few real runs a day: **free tier** |
 | 5-minute cadence | reads take 3-17 min, runs would overlap | **not viable** until reads are faster or parallel |
 | Cloud Scheduler | 3 free jobs per billing account (unverified) | $0 |
-| Cloud Run service (FastAPI), scale to zero | 2M free requests; one open dashboard polling every 15 s is 173k requests/month | $0 to a few dollars |
+| Cloud Run service (FastAPI), scale to zero | 2M free requests; one open dashboard polling every 60 s is 43k requests/month | $0 to a few dollars |
 | Existing RDS | already paid | **$0 incremental** if capacity suffices; staging well under 5 GB |
 | New instance, if needed | RDS db.t4g.micro about $12, db.t4g.small about $23 per month (third party); Cloud SQL shared core about $8 to $26 per month compute only, HA roughly doubles; storage, backups and egress extra | $12 to $60/month |
 | Cross-cloud transfer, if job on Google Cloud and RDS on AWS | about 300 MB of staging per full 1M-row run; at 2,880 runs/month that is about 860 GB leaving Google | **roughly $100/month at about $0.12/GB (unverified)**; this is the strongest reason to reduce rows before they cross clouds or to keep staging in the same cloud |
